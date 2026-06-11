@@ -84,6 +84,10 @@ Claude Code Worker 1..N
 | 自己学習経験 | タイムアウト、遅いタスク、失敗、中断 run から lesson を記録します |
 | 管理ダッシュボード | run、log、worker、lesson を表示する中国語 Web ダッシュボード |
 
+## 自己アップグレード同期ポリシー
+
+AI / コラボレーションエンジンの安定したルール変更は、バックアップと移行性のため GitHub に同期する必要があります。allowlist に基づく最小コミット戦略を採用し、秘密情報、profiles、settings、実行データベース、ログ、セッション記録はコミットしません。詳細は [AI / コラボレーションエンジン自己アップグレード同期ポリシー](docs/self-upgrade-policy.md) を参照してください。
+
 ## 必要環境
 
 - Linux / macOS / WSL

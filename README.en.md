@@ -84,6 +84,10 @@ Returned to user
 | Self-learning lessons | Captures lessons from timeouts, slow tasks, failed runs, and interrupted runs |
 | Dashboard | Chinese web dashboard for runs, logs, workers, and lessons |
 
+## Self-upgrade sync policy
+
+Stable AI / collaboration-engine rule changes must be synchronized to GitHub for backup and migration. Use an allowlist-based minimal commit strategy, and never commit secrets, profiles, settings, runtime databases, logs, or session records. See [AI / collaboration-engine self-upgrade sync policy](docs/self-upgrade-policy.md).
+
 ## Requirements
 
 - Linux / macOS / WSL

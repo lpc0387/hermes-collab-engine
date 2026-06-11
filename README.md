@@ -84,6 +84,10 @@ Claude Code Worker 1..N
 | 自学习经验 | 从超时、慢任务、失败中沉淀经验，用于后续规划 |
 | 管理面板 | 中文 Web 面板展示运行记录、日志、执行器和经验 |
 
+## 自我升级同步策略
+
+AI / 协同引擎的稳定规则变更必须同步到 GitHub，作为备份和迁移能力；提交时采用 allowlist 最小提交策略，并禁止提交密钥、profiles、settings、运行数据库、日志或会话记录。详见 [AI / 协同引擎自我升级同步策略](docs/self-upgrade-policy.md)。
+
 ## 环境要求
 
 - Linux / macOS / WSL
