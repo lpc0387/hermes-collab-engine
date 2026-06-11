@@ -25,9 +25,12 @@
 
 ## 协同职责
 
-- **协同引擎 worker 的定义**：本文中的 worker 指通过 `hermes-collab run` / `hermes-collab worker` 启动、承接 WBS 节点并可直接操作工作区的协同执行进程；它不同于 Hermes `delegate_task` 产生的子代理，后者只是在一次 Hermes 会话内被委派的临时代理，不默认具备独立提交、push 或长期同步职责。
+- **协同引擎 worker 的定义**：本文中的 worker 指通过 `hermes-collab run` / `hermes-collab worker` 启动、在面板中可见、承接 WBS 节点并可按授权直接操作工作区的协同执行进程；它不同于 Hermes `delegate_task` 产生的子代理，后者只是在一次 Hermes 会话内被委派的临时代理，不默认具备独立提交、push 或长期同步职责。
+- **delegate_task 是辅助分析层**：Hermes `delegate_task` 可以使用，但它只适合作为 parent 的辅助层，用于预分析、预拆解、风险审查、方案对比、WBS 优化等，帮助 parent 更准确地调用和分发本地 `/root/hermes-collab-engine/hermes-collab`；它不是面板可见的正式协同执行层，不得冒充或包装成 `hermes-collab` worker。
+- **正式协同执行层必须来自 hermes-collab**：只有通过 `hermes-collab run` / `hermes-collab worker` 启动、在面板中可见、承接 WBS 节点并按授权操作工作区的进程，才可称为正式协同执行层或协同引擎 worker。
 - **Worker 可以执行修改、提交和 push**：在 parent 明确授权的任务范围内，worker 可负责编辑文档、生成模板、执行验证、准备 commit，并在需要时执行 push。
-- **执行身份必须披露**：当任务由协同引擎 worker 执行时，结果报告应明确说明 worker 身份、WBS 节点或授权范围，以及实际修改、验证、提交或推送的文件；若仅使用 Hermes `delegate_task` 子代理辅助检索或审阅，也应说明其角色和不具备独立同步职责。
+- **执行身份必须披露**：结果报告必须明确说明实际使用了哪种执行层。当任务由协同引擎 worker 执行时，应说明 worker 身份、WBS 节点或授权范围，以及实际修改、验证、提交或推送的文件；不得笼统以“Claude 已完成”替代授权链说明。若使用 Hermes `delegate_task` 子代理，只能描述为辅助预分析、预拆解、审阅或方案建议等，不得描述为面板可见 worker 的执行结果。
+- **授权边界必须可核对**：worker 只能在 parent 下发的 WBS 节点、能力范围和文件 allowlist 内执行；若发现需要修改未授权文件、执行提交 / push，或扩大权限，应停止并回报 parent 重新授权。
 - **Parent 必须监督和验证**：parent 必须在准备提交或推送前后检查变更范围、diff、敏感内容和验证结果；不得只依赖 worker 的口头结论。
 - **提交 / push 前验证**：确认只包含本次任务允许的文件，运行必要检查，并审阅是否误带本机状态或密钥。
 - **提交 / push 后验证**：确认远端分支、commit、GitHub 页面或相关同步结果符合预期；若失败，应停止并报告原因。
