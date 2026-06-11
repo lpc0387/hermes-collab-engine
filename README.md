@@ -1,11 +1,11 @@
 # Hermes Collab Engine
 
-> 官方 Hermes Agent + Claude Code Worker 的独立协同引擎。支持复杂度判断、WBS 拆解、并行分发、超时拆分重试、SQLite 持久化、自学习经验和中文管理面板。
+> 面向官方 Hermes Agent 与 Claude Code 的协同执行引擎：自动判断任务复杂度，按 WBS 拆解，多执行器并行分发，超时自动拆分重试，SQLite 持久化，并提供中文管理面板。
 
-[![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](#requirements)
-[![SQLite](https://img.shields.io/badge/Persistence-SQLite-green)](#why-sqlite)
-[![Hermes](https://img.shields.io/badge/Hermes-Agent-purple)](#verified-runtime-chain)
-[![Claude Code](https://img.shields.io/badge/Workers-Claude%20Code-orange)](#verified-runtime-chain)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](#环境要求)
+[![SQLite](https://img.shields.io/badge/SQLite-持久化-green)](#持久化)
+[![Hermes](https://img.shields.io/badge/Hermes-Agent-purple)](#运行链路)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-Worker-orange)](#运行链路)
 
 ## 一键部署
 
@@ -13,220 +13,144 @@
 curl -fsSL https://raw.githubusercontent.com/lpc0387/hermes-collab-engine/main/scripts/install.sh | bash
 ```
 
-安装后启动：
+部署完成后启动：
 
 ```bash
 opc
 ```
 
-`opc` 会读取 `/root/.claude/settings.json` 和 `/root/.claude/profiles/*.json`，让你选择：
+`opc` 会引导你完成：
 
-1. API 配置来源
-2. Leader Agent（Hermes 命令行 / 规划与聚合大脑）模型
-3. Worker Agent（Claude Code 执行器大脑）模型
-4. 面板监听地址和端口
-5. 默认工作目录
+1. 选择自动读取本机 Claude/Hermes 配置，或手动填写 BaseURL、API Key 和模型列表；
+2. 选择 Leader Agent 模型；
+3. 选择 Worker Agent 模型；
+4. 选择管理面板监听地址、端口和默认工作目录；
+5. 启动协同引擎管理面板；
+6. 自动进入官方 Hermes 命令行。
 
-然后自动启动协同引擎管理面板，并进入官方 Hermes 命令行。
+退出 Hermes 命令行后，`opc` 会停止本次启动的管理面板服务。
 
-## 项目定位
+## 它解决什么问题
 
-Standalone collaboration engine for coordinating Claude Code workers under official Hermes Agent supervision.
+单个 Agent 在处理大型任务时容易遇到：
 
-This project is intentionally separate from `im-bridge`. The design documents in `/root/im-bridge/docs/hermes-framework` were used as reference material only; this project does not install dependencies into `im-bridge` and does not modify its source code.
+- 任务边界不清，无法判断是否需要拆解；
+- 所有工作串行执行，效率低；
+- 长任务超时后缺少断点和重试策略；
+- 多个 Worker 的状态不可见；
+- 执行历史、失败原因、经验无法沉淀；
+- 缺少统一面板查看日志、运行状态和任务图。
 
-## Verified Runtime Chain
+Hermes Collab Engine 将任务执行拆成“规划层”和“执行层”：
 
-The actual working chain is:
+- **Leader Agent** 负责复杂度判断、WBS 拆解和结果聚合；
+- **Worker Agent** 负责执行具体 WBS 节点；
+- **SQLite** 记录运行状态、节点、执行器、日志和学习经验；
+- **管理面板** 实时展示运行状态。
+
+## 运行链路
 
 ```text
-Official NousResearch Hermes Agent (/root/hermes)
-  ↓ terminal tool
-Hermes Collab Engine (/root/hermes-collab-engine)
-  ↓ Python orchestration + SQLite state
-Claude Code CLI workers (`claude -p ... --output-format json`)
+用户
   ↓
-Optional aggregation worker
+官方 Hermes Agent
+  ↓ terminal 工具
+Hermes Collab Engine
+  ↓ WBS / 调度 / SQLite / Watchdog
+Claude Code Worker 1..N
   ↓
-Hermes returns the final result
+聚合结果
+  ↓
+返回用户
 ```
 
-Verified commands:
+## 核心能力
 
-```bash
-# Official Hermes repository/version
-git -C /root/hermes remote -v
-hermes --version
-
-# Official Hermes terminal tool
-hermes -z "Use terminal to run: echo OFFICIAL_HERMES_TERMINAL_OK. Reply only with the command output." --provider anthropic --model kimi-k2.6
-
-# Claude Code CLI
-claude -p "Reply exactly: CLAUDE_CODE_REAL_OK" --output-format json
-
-# Collab engine calling Claude Code
-cd /root/hermes-collab-engine
-./hermes-collab run "Reply exactly: COLLAB_ENGINE_CALLS_CLAUDE_OK" --timeout 120 --json
-
-# Full chain: Hermes → collab engine → Claude Code
-hermes -z "Use terminal to run: /root/hermes-collab-engine/hermes-collab run 'Reply exactly: HERMES_TO_COLLAB_TO_CLAUDE_OK' --timeout 120 --json. Reply only with the JSON output." --provider anthropic --model kimi-k2.6
-```
-
-## What It Does
-
-Hermes Collab Engine provides a practical WBS-based collaboration runtime:
-
-- Autonomously assesses task complexity.
-- Routes simple tasks directly and complex tasks through WBS decomposition.
-- Builds WBS nodes with dependencies, capability tags, complexity, parallelizability, and deliverables.
-- Dispatches dependency-ready WBS nodes in parallel with a configurable concurrency limit.
-- Launches real Claude Code workers via `claude -p`.
-- Supervises workers with watchdog timeouts.
-- Splits timed-out tasks into smaller retry shards instead of treating timeout as final failure.
-- Aggregates parent and shard results honestly.
-- Persists runs, WBS nodes, workers, logs, metrics, and lessons in SQLite.
-- Learns from slow or failed runs and writes lessons for future planning.
-- Exposes a web dashboard with logs, run state, worker status, lessons, metrics, and SSE live updates.
-
-## Design Inputs
-
-Reference documents read from `im-bridge`:
-
-```text
-/root/im-bridge/docs/hermes-framework/01-overview.md
-/root/im-bridge/docs/hermes-framework/02-hermes-core.md
-/root/im-bridge/docs/hermes-framework/03-worker-pool.md
-/root/im-bridge/docs/hermes-framework/04-persistence.md
-/root/im-bridge/docs/hermes-framework/05-self-evolution.md
-/root/im-bridge/docs/hermes-framework/06-integration.md
-/root/im-bridge/docs/hermes-framework/07-roadmap.md
-```
-
-The implemented project follows those themes while remaining standalone.
-
-## Why SQLite
-
-Persistence uses Python's standard `sqlite3` module backed by a real SQLite database file. This avoids native Node build issues and keeps the engine portable without `npm install`.
-
-Default database:
-
-```text
-/root/hermes-collab-engine/data/collab.sqlite3
-```
-
-SQLite tables:
-
-| Table | Purpose |
+| 能力 | 说明 |
 |---|---|
-| `runs` | Top-level collaboration run, request, complexity decision, lifecycle status |
-| `wbs_nodes` | WBS DAG nodes, parent/child shards, dependency JSON, results, errors |
-| `workers` | Claude Code worker lifecycle, session IDs, duration, status, error |
-| `logs` | Structured run/node logs for dashboard and audit |
-| `lessons` | Self-learning memory from timeouts and slow workers |
-| `metrics` | Extensible key/value metrics |
+| 复杂度判断 | 根据领域、步骤数、模糊度、耦合度、风险计算任务复杂度 |
+| WBS 拆解 | 复杂任务自动拆成可执行的工作分解节点 |
+| 并行分发 | 依赖满足的节点并行交给 Claude Code 执行器 |
+| 超时守护 | Worker 超时后自动进入拆分与重试流程 |
+| 分片重试 | 超时节点会拆成范围、证据、实现、风险等聚焦分片 |
+| 结果聚合 | 聚合父任务和分片结果，诚实报告成功、失败和超时 |
+| SQLite 持久化 | 使用真实 SQLite 文件保存运行历史和状态 |
+| 自学习经验 | 从超时、慢任务、失败中沉淀经验，用于后续规划 |
+| 管理面板 | 中文 Web 面板展示运行记录、日志、执行器和经验 |
 
-SQLite writes are protected by a thread lock because workers run concurrently.
+## 环境要求
 
-## Project Layout
-
-```text
-hermes-collab-engine/
-├── hermes-collab                         # CLI wrapper
-├── README.md                             # This document
-├── data/
-│   └── collab.sqlite3                    # SQLite database
-├── examples/
-│   └── im-bridge-request.md              # Example high-level request
-├── src/
-│   ├── __init__.py
-│   └── hermes_collab_engine/
-│       ├── __init__.py
-│       ├── cli.py                        # CLI entrypoint: run/server/status
-│       ├── engine.py                     # WBS scheduling, workers, watchdog, aggregation, learning
-│       ├── models.py                     # ComplexityScore, WBSNode, WorkerResult dataclasses
-│       ├── planner.py                    # Complexity scoring and WBS decomposition
-│       ├── server.py                     # HTTP dashboard + JSON API + SSE
-│       └── store.py                      # SQLite schema and persistence API
-└── web/
-    └── index.html                        # Single-file management dashboard
-```
-
-## Requirements
-
+- Linux / macOS / WSL
 - Python 3.11+
-- Claude Code CLI available as `claude`
-- Official Hermes Agent available as `hermes` if you want Hermes to operate the engine
+- Git
+- Claude Code CLI：`claude`
+- 官方 Hermes Agent：`hermes`
 
-No Node or npm dependency is required for this project.
+无需 Node.js 依赖，无需 npm install。
 
-## Interactive Startup Script
-
-Use the startup script when you want to choose the brain models at launch time:
-
-```bash
-cd /root/hermes-collab-engine
-./start.sh
-```
-
-The script reads API configuration from:
-
-```text
-/root/.claude/settings.json
-/root/.claude/profiles/*.json
-```
-
-It then asks you to choose:
-
-1. API profile / BaseURL / API key source
-2. Leader Agent model — the Hermes-side planning and aggregation brain
-3. Worker Agent model — the Claude Code execution brain
-4. Dashboard listen host
-5. Dashboard listen port
-6. Default working directory
-
-It writes the chosen runtime configuration to:
-
-```text
-/root/hermes-collab-engine/.runtime-config.json
-```
-
-Example interactive choices:
-
-```text
-选择 API 配置来源
-  1. 当前 Claude Code 配置 | <从本机 Claude 配置读取的 BaseURL> | 模型数 9
-  2. mimo | <从本机 profile 读取的 BaseURL> | 模型数 3
-  3. volcengine | <从本机 profile 读取的 BaseURL> | 模型数 9
-
-选择 Leader Agent（Hermes/规划与聚合大脑）模型
-  1. kimi-k2.6
-  2. glm-5.1
-  ...
-
-选择 Worker Agent（Claude Code 执行器大脑）模型
-  1. kimi-k2.6
-  2. glm-5.1
-  ...
-```
-
-The startup script exports the selected API key, BaseURL, leader model, and worker model into the launched server process.
-
-## CLI Usage
-
-### Run a simple task
+## 启动器
 
 ```bash
-cd /root/hermes-collab-engine
-./hermes-collab run "Reply exactly: COLLAB_ENGINE_OK" --timeout 120 --json
+opc
 ```
 
-### Run the reference high-level task
+启动器支持两种 API 配置方式：
+
+### 自动读取本机配置
+
+会读取：
+
+```text
+~/.claude/settings.json
+~/.claude/profiles/*.json
+```
+
+适合已经配置好 Claude Code / Hermes 的服务器。
+
+### 手动填写配置
+
+会提示输入：
+
+- BaseURL
+- API Key / Auth Token
+- 可用模型列表，多个模型用英文逗号分隔
+
+适合新服务器或不希望读取本机配置的场景。
+
+## 模型选择
+
+启动时会分别选择：
+
+### Leader Agent 模型
+
+用于：
+
+- 复杂度判断；
+- WBS 拆解；
+- 结果聚合；
+- 进入 Hermes 命令行时作为 Hermes 的默认模型。
+
+### Worker Agent 模型
+
+用于：
+
+- Claude Code Worker 执行；
+- WBS 节点处理；
+- 超时后的分片重试。
+
+## 命令行使用
+
+### 运行一次任务
 
 ```bash
-cd /root/hermes-collab-engine
-./hermes-collab run \
-  --request-file examples/im-bridge-request.md \
-  --cwd /root/im-bridge \
+hermes-collab run "分析当前项目结构并给出改进建议" --cwd . --json
+```
+
+### 指定并行量和超时策略
+
+```bash
+hermes-collab run "实现一个协同任务" \
+  --cwd . \
   --concurrency 4 \
   --timeout 900 \
   --max-retries 2 \
@@ -234,85 +158,79 @@ cd /root/hermes-collab-engine
   --json
 ```
 
-### Check status
+### 使用任务文件
 
 ```bash
-cd /root/hermes-collab-engine
-./hermes-collab status --json
+hermes-collab run --request-file request.md --cwd . --json
 ```
 
-### Start dashboard
+### 启动管理面板
 
 ```bash
-cd /root/hermes-collab-engine
-./hermes-collab server --host 0.0.0.0 --port 8765 --cwd /root
+hermes-collab server --host 0.0.0.0 --port 8765 --cwd .
 ```
 
-Open:
+访问：
 
 ```text
-http://localhost:8765
+http://服务器IP:8765
 ```
 
-## Official Hermes Usage
-
-From official Hermes, call the engine through the terminal tool:
+### 查看状态
 
 ```bash
-hermes -z "Use terminal to run: /root/hermes-collab-engine/hermes-collab run 'Reply exactly: HERMES_TO_COLLAB_TO_CLAUDE_OK' --timeout 120 --json. Reply only with the JSON output." --provider anthropic --model kimi-k2.6
+hermes-collab status --json
 ```
 
-For a real task:
+## 管理面板
 
-```bash
-hermes -z "Use terminal to run: /root/hermes-collab-engine/hermes-collab run --request-file /root/hermes-collab-engine/examples/im-bridge-request.md --cwd /root/im-bridge --concurrency 4 --timeout 900 --max-retries 2 --split-count 4 --json. Summarize the run status and aggregate result." --provider anthropic --model kimi-k2.6
-```
+管理面板提供：
 
-## How Complexity Routing Works
+- 总运行次数；
+- 正在运行数量；
+- 运行中执行器数量；
+- 学习经验数量；
+- 运行记录列表；
+- 运行详情；
+- 实时日志；
+- 自学习经验；
+- 在线提交协同任务；
+- SSE 实时更新。
 
-`Planner.assess()` scores the request across:
+## API
 
-- `domain`
-- `steps`
-- `ambiguity`
-- `coupling`
-- `risk`
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/overview` | 总览指标 |
+| GET | `/api/runs` | 运行记录 |
+| GET | `/api/runs/:id` | 单次运行详情 |
+| GET | `/api/logs` | 最近日志 |
+| GET | `/api/lessons` | 自学习经验 |
+| GET | `/api/events` | 实时事件流 |
+| POST | `/api/runs` | 异步提交任务 |
 
-It calculates `overall` and chooses routing:
+## 持久化
+
+默认数据库：
 
 ```text
-overall <= 3      direct
-overall <= 6      single / moderate path
-overall > 6       WBS decomposition
+data/collab.sqlite3
 ```
 
-For WBS tasks, `Planner.decompose()` asks Claude Code to produce a JSON WBS. If that fails, it falls back to a deterministic WBS template.
+数据表：
 
-## WBS Node Model
+| 表 | 用途 |
+|---|---|
+| `runs` | 顶层任务运行记录 |
+| `wbs_nodes` | WBS 节点、依赖、状态和结果 |
+| `workers` | 执行器生命周期、会话 ID、耗时和错误 |
+| `logs` | 结构化日志 |
+| `lessons` | 自学习经验 |
+| `metrics` | 扩展指标 |
 
-Each WBS node has:
+## 超时拆分策略
 
-```text
-id
-title
-description
-capability
-complexity
-dependencies
-parallelizable
-deliverable
-status
-parent_id
-attempt
-```
-
-The engine only runs dependency-ready nodes. Independent nodes run concurrently.
-
-## Watchdog, Retry, and Sharding
-
-Timeouts are treated as decomposition signals, not final failure.
-
-Default run policy:
+默认参数：
 
 ```text
 --timeout 900
@@ -320,127 +238,73 @@ Default run policy:
 --split-count 4
 ```
 
-If a worker times out, its WBS node is split into focused shards:
+当某个 Worker 超时，系统不会直接结束任务，而是将该节点拆成更小的分片：
 
-| Shard | Focus |
+| 分片 | 目标 |
 |---|---|
-| `scope` | smallest relevant scope and entrypoints |
-| `evidence` | exact file paths, commands, symbols, short evidence |
-| `implementation` | minimal implementation or patch strategy |
-| `risks` | blockers, unknowns, verification needs |
+| 范围分片 | 找到最小相关范围和入口 |
+| 证据分片 | 收集文件、命令、符号和证据 |
+| 实现分片 | 产出最小实现或补丁策略 |
+| 风险分片 | 找出阻塞点、未知项和验证需求 |
 
-Shard nodes are inserted into SQLite as child WBS nodes and executed as workers.
+分片会重新分发给 Worker，最后统一聚合。
 
-## Self-Learning / Evolution
+## 与 Hermes 集成
 
-The engine writes lessons into SQLite:
-
-- timeout lessons — split similar work earlier next time
-- slow-success lessons — reduce WBS scope for similar tasks
-
-Current learning storage:
+安装脚本会创建：
 
 ```text
-lessons(category, lesson, evidence_json, created_at)
+~/.local/bin/hermes-collab
+~/.local/bin/opc
 ```
 
-This is intentionally simple and inspectable. Future versions can feed these lessons back into `Planner.assess()` and `Planner.decompose()`.
-
-## Dashboard
-
-The dashboard is a single-file HTML app served by the Python server.
-
-It shows:
-
-- run counts
-- running count
-- worker-running count
-- lessons count
-- run table
-- recent logs
-- lessons
-- live SSE heartbeat
-- task submission form
-
-### Dashboard API
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /api/overview` | counts and high-level metrics |
-| `GET /api/runs` | recent runs |
-| `GET /api/runs/:id` | run detail, WBS nodes, workers, logs |
-| `GET /api/logs` | recent structured logs |
-| `GET /api/lessons` | learned lessons |
-| `GET /api/events` | SSE live updates |
-| `POST /api/runs` | async run submission |
-
-## Verification Results
-
-### Official Hermes is real
-
-```text
-Hermes Agent v0.16.0 (2026.6.5) · upstream ee1a744a
-Project: /root/hermes
-```
-
-### Hermes terminal tool works
-
-```text
-OFFICIAL_HERMES_TERMINAL_OK
-```
-
-### Claude Code CLI works
-
-```text
-CLAUDE_CODE_REAL_OK
-```
-
-### Collab engine calls Claude Code
-
-```json
-{
-  "ok": true,
-  "results": [
-    {
-      "result": "COLLAB_ENGINE_CALLS_CLAUDE_OK",
-      "session_id": "d8e67dc7-26f4-4f7f-b759-9aa1fde084df"
-    }
-  ]
-}
-```
-
-### Full chain works
-
-Official Hermes → terminal → collab engine → Claude Code returned:
-
-```text
-HERMES_TO_COLLAB_TO_CLAUDE_OK
-```
-
-### Dashboard API works
+可选集成脚本：
 
 ```bash
-curl -s http://127.0.0.1:8765/api/overview
+~/hermes-collab-engine/scripts/install-hermes-integration.sh
 ```
 
-Example response:
+它会为 Hermes 写入：
 
-```json
-{
-  "runs": 4,
-  "running": 0,
-  "completed": 2,
-  "failed": 2,
-  "workers_running": 0,
-  "lessons": 0
-}
+- 本地 Skill；
+- Memory；
+- SOUL 行为提示；
+
+让 Hermes 知道：遇到实现、分析、调试、审计、研究、规划、多步骤任务时，默认使用协同引擎。
+
+## 安全边界
+
+- 不上传或提交运行数据库；
+- 不提交 `.runtime-config.json`；
+- 不提交 API Key；
+- 不修改用户业务项目；
+- Worker 的实际行为由 Claude Code CLI 执行，应按需要设置权限策略和工作目录。
+
+## 开发结构
+
+```text
+hermes-collab-engine/
+├── hermes-collab
+├── start.sh
+├── start.py
+├── scripts/
+│   ├── install.sh
+│   └── install-hermes-integration.sh
+├── src/hermes_collab_engine/
+│   ├── cli.py
+│   ├── engine.py
+│   ├── models.py
+│   ├── planner.py
+│   ├── server.py
+│   └── store.py
+├── web/
+│   └── index.html
+├── examples/
+│   └── im-bridge-request.md
+└── data/
+    └── .gitkeep
 ```
 
-## Important Boundaries
+## 许可证
 
-- This project is standalone.
-- It does not install packages into `im-bridge`.
-- It does not replace official Hermes Agent.
-- It uses official Hermes as an operator surface and Claude Code as workers.
-- It uses real SQLite via Python's `sqlite3` module.
-- It reports parent timeouts and shard outcomes separately.
+MIT

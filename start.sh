@@ -8,7 +8,7 @@ opc - 启动 Hermes 协同引擎
   opc
 
 流程:
-  1. 从 /root/.claude/settings.json 和 /root/.claude/profiles/*.json 读取 API 配置
+  1. 选择自动读取本机 Claude/Hermes 配置，或手动填写 BaseURL、API Key 和模型列表
   2. 选择 Leader Agent（Hermes 命令行 / 规划与聚合大脑）模型
   3. 选择 Worker Agent（Claude Code 执行器大脑）模型
   4. 启动协同引擎管理面板
