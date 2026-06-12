@@ -71,7 +71,7 @@ class RiskDetectionTests(unittest.TestCase):
             engine._apply_risk_policy("run_1", [("low", "Node wbs-1 timed out; auto-split")], RiskPolicy(low="auto"))
 
             self.assertEqual(engine._checkpoint_paused_nodes, set())
-            self.assertEqual([shard.id for shard in shards], ["wbs-1-scope-1", "wbs-1-evidence-2"])
+            self.assertEqual([shard.id for shard in shards], ["wbs-1-scope-1", "wbs-1-evidence-2", "wbs-1-impl-3"])
             logs = engine.store._query("SELECT level, message FROM logs WHERE level='risk'")
             self.assertIn("action=auto", logs[0]["message"])
 

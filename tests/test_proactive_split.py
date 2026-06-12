@@ -51,13 +51,23 @@ class ProactiveSplitTests(unittest.TestCase):
         self.assertEqual([shard.id for shard in shards], [
             "wbs-1-scope-1",
             "wbs-1-evidence-2",
-            "wbs-1-implementation-3",
-            "wbs-1-risks-4",
-            "wbs-1-scope-5",
+            "wbs-1-impl-3",
+            "wbs-1-impl-4",
+            "wbs-1-impl-5",
         ])
         self.assertTrue(all(shard.parent_id == "wbs-1" for shard in shards))
         self.assertTrue(all(shard.attempt == 2 for shard in shards))
         self.assertTrue(all(shard.parallelizable for shard in shards))
+        # Phase 1 shards (scope, evidence) have no dependencies
+        self.assertEqual(shards[0].dependencies, [])
+        self.assertEqual(shards[1].dependencies, [])
+        # Phase 2 shards (impl) depend on phase 1
+        for impl_shard in shards[2:]:
+            self.assertIn("wbs-1-scope-1", impl_shard.dependencies)
+            self.assertIn("wbs-1-evidence-2", impl_shard.dependencies)
+        # Impl shards have implementation capability
+        for impl_shard in shards[2:]:
+            self.assertEqual(impl_shard.capability, "implementation")
 
     def test_over_estimate_logs_warning_and_runs_shards(self) -> None:
         node = make_node(600)
@@ -71,10 +81,12 @@ class ProactiveSplitTests(unittest.TestCase):
 
         self.engine._run_worker = fake_run_worker
 
-        result = self.engine.run("split this", concurrency=2, timeout=900, max_retries=1, split_count=2, aggregate=False)
+        result = self.engine.run("split this", concurrency=2, timeout=900, max_retries=1, split_count=4, aggregate=False)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(calls, ["wbs-1-scope-1", "wbs-1-evidence-2"])
+        # split_count=4 → scope + evidence + 2 impl shards = 4 total
+        self.assertIn("wbs-1-scope-1", calls)
+        self.assertIn("wbs-1-evidence-2", calls)
         parent = self.engine.store._one("SELECT status, result FROM wbs_nodes WHERE id='wbs-1'")
         self.assertEqual(parent["status"], "completed")
         self.assertEqual(parent["result"], "Completed by proactive shards")

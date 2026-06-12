@@ -239,9 +239,23 @@ class CollabEngine:
             for shard in shards:
                 self.store.insert_wbs_node(run_id, shard.to_dict())
                 self.store.update_node(shard.id, "pending")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(split_count, 4)) as pool:
-                futs = [pool.submit(self._run_worker, run_id, shard, timeout) for shard in shards]
+            # Phase 1: run read-only context shards (scope + evidence) in parallel
+            phase1 = [s for s in shards if not s.dependencies]
+            phase2 = [s for s in shards if s.dependencies]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(phase1), 4)) as pool:
+                futs = {pool.submit(self._run_worker, run_id, s, timeout): s for s in phase1}
                 for fut in concurrent.futures.as_completed(futs):
+                    shard = futs[fut]
+                    res = fut.result()
+                    results.append(res)
+                    self.store.update_node(res.node_id, "completed" if res.ok else "failed", res.result, res.session_id, res.duration_seconds, None if res.ok else res.result)
+                    if res.ok:
+                        self._record_node_result(res)
+            # Phase 2: run implementation shards (with phase 1 upstream context)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(phase2), 4)) as pool:
+                futs = {pool.submit(self._run_worker, run_id, s, timeout): s for s in phase2}
+                for fut in concurrent.futures.as_completed(futs):
+                    shard = futs[fut]
                     res = fut.result()
                     results.append(res)
                     self.store.update_node(res.node_id, "completed" if res.ok else "failed", res.result, res.session_id, res.duration_seconds, None if res.ok else res.result)
@@ -256,30 +270,72 @@ class CollabEngine:
                 self._node_results_struct[result.node_id] = result.result_struct
 
     def _split_node(self, node: WBSNode, split_count: int) -> list[WBSNode]:
-        focuses = [
-            ("scope", "Find the smallest relevant scope and entrypoints only."),
-            ("evidence", "Collect exact file paths, commands, symbols, and evidence only."),
-            ("implementation", "Produce a minimal implementation plan or patch strategy only."),
-            ("risks", "Identify blockers, unknowns, and verification needs only."),
-        ]
-        shards = []
-        for i in range(split_count):
-            key, guidance = focuses[i % len(focuses)]
-            shard = WBSNode(
-                id=f"{node.id}-{key}-{i+1}",
-                title=f"{node.title} / {key}",
-                description=f"Shard from timed-out or over-budget parent. {guidance}\n\nOriginal task:\n{node.description}",
-                capability=node.capability,
+        """Split an over-budget node into shards.
+
+        Phase 1 (parallel, read-only): scope + evidence — collect context.
+        Phase 2 (depends on phase 1): implementation — actually write files.
+        """
+        # Phase 1: read-only context shards
+        scope_shard = WBSNode(
+            id=f"{node.id}-scope-1",
+            title=f"{node.title} / scope",
+            description=(
+                f"Shard from over-budget parent — SCOPE phase (read-only).\n"
+                f"Find the smallest relevant scope, entrypoints, and file locations.\n"
+                f"Read files but do NOT modify anything.\n\n"
+                f"Original task:\n{node.description}"
+            ),
+            capability="analysis",
+            complexity=max(1, node.complexity - 3),
+            dependencies=[],
+            parallelizable=True,
+            deliverable="Scope summary: files, symbols, entrypoints to change",
+            parent_id=node.id,
+            attempt=node.attempt + 1,
+            brief=node.brief,
+        )
+        evidence_shard = WBSNode(
+            id=f"{node.id}-evidence-2",
+            title=f"{node.title} / evidence",
+            description=(
+                f"Shard from over-budget parent — EVIDENCE phase (read-only).\n"
+                f"Collect exact file paths, commands, symbols, and evidence.\n"
+                f"Read files but do NOT modify anything.\n\n"
+                f"Original task:\n{node.description}"
+            ),
+            capability="analysis",
+            complexity=max(1, node.complexity - 3),
+            dependencies=[],
+            parallelizable=True,
+            deliverable="Evidence: exact paths, line numbers, symbols found",
+            parent_id=node.id,
+            attempt=node.attempt + 1,
+            brief=node.brief,
+        )
+        # Phase 2: implementation shards that depend on phase 1
+        impl_shards = []
+        for i in range(max(1, split_count - 2)):
+            impl_shard = WBSNode(
+                id=f"{node.id}-impl-{i+3}",
+                title=f"{node.title} / implementation-{i+1}",
+                description=(
+                    f"Shard from over-budget parent — IMPLEMENTATION phase.\n"
+                    f"You MUST write actual code changes to files. Do NOT just produce a plan.\n"
+                    f"Use the upstream context from scope and evidence shards to guide your changes.\n"
+                    f"Focus on a distinct subset of the original task.\n\n"
+                    f"Original task:\n{node.description}"
+                ),
+                capability="implementation",
                 complexity=max(1, node.complexity - 2),
-                dependencies=[],
+                dependencies=[scope_shard.id, evidence_shard.id],
                 parallelizable=True,
-                deliverable=f"Focused {key} shard result",
+                deliverable=f"Working implementation (files modified)",
                 parent_id=node.id,
                 attempt=node.attempt + 1,
                 brief=node.brief,
             )
-            shards.append(shard)
-        return shards
+            impl_shards.append(impl_shard)
+        return [scope_shard, evidence_shard] + impl_shards
 
     def _plan_nodes_by_id(self) -> dict[str, WBSNode]:
         plan = self._current_plan
