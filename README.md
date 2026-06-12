@@ -59,12 +59,17 @@ Hermes Collab Engine 将任务执行拆成“规划层”和“执行层”：
 ```text
 用户
   ↓
-官方 Hermes Agent
+Hermes 父代理
+  ├─ 可选：delegate_task 预分析
   ↓ terminal 工具
 Hermes Collab Engine
-  ↓ WBS / 调度 / SQLite / Watchdog
+  ├─ Leader：复杂度评分 / WBS / 主动拆分
+  ├─ Scheduler：流式调度 / 干预控制
+  ├─ SQLite：运行 / 节点 / 日志 / scoped lessons
+  └─ Watchdog：超时拆分
+      ↓
 Claude Code Worker 1..N
-  ↓
+  ↓ 双轨输出（机器结果 + 人类交付物）
 聚合结果
   ↓
 返回用户
@@ -83,6 +88,15 @@ Claude Code Worker 1..N
 | SQLite 持久化 | 使用真实 SQLite 文件保存运行历史和状态 |
 | 自学习经验 | 从超时、慢任务、失败中沉淀经验，用于后续规划 |
 | 管理面板 | 中文 Web 面板展示运行记录、日志、执行器和经验 |
+| Leader 驱动评分 | Leader Agent 负责复杂度评分，按领域、步骤、模糊度、耦合度和风险决定执行策略 |
+| 语义压缩拆解 | Planner 输出共享 brief 和节点 brief，把大任务压缩成 Worker 可执行的最小上下文 |
+| 双轨输出 | Worker 同时产出机器可解析结果和人类可读交付物，便于调度、面板和最终汇报使用 |
+| 分级上游上下文 | Worker prompt 自动带入 parent、grandparent 和已完成依赖结果，保持分片 lineage 可追溯 |
+| 流式调度 | 调度器在依赖满足且有空闲槽位时立即派发节点，避免固定批次屏障拖慢下游链路 |
+| 主动拆分 | 对预计超时或高风险节点可在执行前拆成聚焦分片，而不是等到超时后再补救 |
+| 父代干预 | Parent / Operator 可通过 CLI 记录日志、kill、split、skip 运行中节点，并写入审计日志 |
+| 经验作用域 | lessons 带有 global、project、run、node、wbs-family 作用域，避免局部经验污染全局规划 |
+| 环境变量模型 | CLI 支持 HERMES_COLLAB_MODEL、HERMES_COLLAB_LEADER_MODEL、HERMES_COLLAB_WORKER_MODEL 与 ANTHROPIC_MODEL 作为模型回退 |
 
 ## 自我升级同步策略
 
@@ -192,6 +206,40 @@ http://服务器IP:8765
 hermes-collab status --json
 ```
 
+### 管理经验
+
+写入带作用域的经验：
+
+```bash
+hermes-collab lesson add \
+  --scope project \
+  --category planning \
+  --lesson "类似任务优先拆成分析、实现、验证三段" \
+  --source hermes-delegate-task \
+  --evidence-json '{"run_id":"run_xxx"}'
+```
+
+查看经验：
+
+```bash
+hermes-collab lesson list --scope project --json
+```
+
+支持的 scope：`global`、`project`、`run`、`node`、`wbs-family`。
+
+### 运行中干预
+
+Parent / Operator 可以通过 CLI 对运行中的节点进行受控干预：
+
+```bash
+hermes-collab parent-log --run-id run_xxx --message "人工确认继续执行" --json
+hermes-collab split-node --node-id wbs-1 --split-count 4 --reason "范围过大，主动拆分" --json
+hermes-collab skip-node --node-id wbs-2 --reason "上游已确认无需执行" --json
+hermes-collab kill-node --node-id wbs-3 --signal TERM --reason "执行方向错误，停止重试" --json
+```
+
+所有干预都会写入日志，最终汇报必须披露人工干预、跳过、取消或强制推进等事实。
+
 ## 管理面板
 
 管理面板提供：
@@ -238,6 +286,8 @@ data/collab.sqlite3
 | `lessons` | 自学习经验 |
 | `metrics` | 扩展指标 |
 
+`lessons` 带有明确作用域：`global` 和 `project` 可被后续规划复用；`run`、`node`、`wbs-family` 只用于对应运行、节点或同一 WBS 家族，避免把局部经验误用为全局规则。
+
 ## 超时拆分策略
 
 默认参数：
@@ -258,6 +308,19 @@ data/collab.sqlite3
 | 风险分片 | 找出阻塞点、未知项和验证需求 |
 
 分片会重新分发给 Worker，最后统一聚合。
+
+## Agent 通信协议
+
+本项目使用 ACP-Collab v0.2 约定 Hermes 父代理、协同引擎 Leader、Worker 与外部预分析层之间的通信边界。完整协议见 [Agent Communication Protocol](docs/agent-communication-protocol.md)。
+
+核心约定：
+
+- Request 通道：Parent 通过 CLI/API 提交自包含请求，Worker 不假设能读取父会话历史；
+- Dual-Track Result 通道：Worker 输出同时包含机器可解析结果和人类可读交付物；
+- Upstream-Context 通道：Engine 将 parent、grandparent 与已完成依赖结果注入下游 Worker；
+- Scoped Lessons 通道：经验必须带 source 和 scope，Planner 只复用适用范围内的经验；
+- Dispatch-Control 通道：流式调度、主动拆分和运行中干预都经 CLI/API 与 SQLite 状态机记录；
+- Observability 通道：runs、wbs_nodes、workers、logs、lessons 是面板与 Parent 的统一观测路径。
 
 ## 与 Hermes 集成
 
@@ -309,6 +372,9 @@ hermes-collab-engine/
 │   └── store.py
 ├── web/
 │   └── index.html
+├── docs/
+│   ├── agent-communication-protocol.md
+│   └── self-upgrade-policy.md
 ├── examples/
 │   └── im-bridge-request.md
 └── data/

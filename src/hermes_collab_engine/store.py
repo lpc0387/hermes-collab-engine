@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY,title TEXT NOT NULL,request
 CREATE TABLE IF NOT EXISTS wbs_nodes (id TEXT PRIMARY KEY,run_id TEXT NOT NULL,parent_id TEXT,title TEXT NOT NULL,description TEXT NOT NULL,capability TEXT NOT NULL,complexity INTEGER NOT NULL,dependencies_json TEXT NOT NULL DEFAULT '[]',parallelizable INTEGER NOT NULL DEFAULT 1,deliverable TEXT NOT NULL,status TEXT NOT NULL,attempt INTEGER NOT NULL DEFAULT 1,result TEXT,session_id TEXT,duration_seconds REAL,error TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(run_id) REFERENCES runs(id));
 CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY,run_id TEXT NOT NULL,node_id TEXT,status TEXT NOT NULL,started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,duration_seconds REAL,session_id TEXT,error TEXT);
 CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT,node_id TEXT,level TEXT NOT NULL,message TEXT NOT NULL,data_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS lessons (id INTEGER PRIMARY KEY AUTOINCREMENT,category TEXT NOT NULL,lesson TEXT NOT NULL,evidence_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS lessons (id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT NOT NULL DEFAULT 'global',category TEXT NOT NULL,lesson TEXT NOT NULL,evidence_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS metrics (key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 """
 
@@ -26,7 +26,13 @@ class CollabStore:
         self.conn.row_factory = sqlite3.Row
         with self.lock:
             self.conn.executescript(SCHEMA)
+            self._migrate_lessons_scope()
             self.conn.commit()
+
+    def _migrate_lessons_scope(self) -> None:
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(lessons)").fetchall()}
+        if "scope" not in columns:
+            self.conn.execute("ALTER TABLE lessons ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'")
 
     def _execute(self, sql: str, params: tuple = ()):
         with self.lock:
@@ -91,8 +97,8 @@ class CollabStore:
     def worker_finish(self, worker_id: str, status: str, duration_seconds: float | None = None, session_id: str | None = None, error: str | None = None) -> None:
         self._execute("UPDATE workers SET status=?, duration_seconds=?, session_id=?, error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (status, duration_seconds, session_id, error, worker_id))
 
-    def add_lesson(self, category: str, lesson: str, evidence: dict[str, Any] | None = None) -> None:
-        self._execute("INSERT INTO lessons(category,lesson,evidence_json) VALUES(?,?,?)", (category, lesson, json.dumps(evidence or {}, ensure_ascii=False)))
+    def add_lesson(self, category: str, lesson: str, evidence: dict[str, Any] | None = None, scope: str = "global") -> None:
+        self._execute("INSERT INTO lessons(scope,category,lesson,evidence_json) VALUES(?,?,?,?)", (scope, category, lesson, json.dumps(evidence or {}, ensure_ascii=False)))
 
     def overview(self) -> dict[str, Any]:
         def scalar(sql: str):
@@ -109,5 +115,7 @@ class CollabStore:
     def recent_logs(self, limit: int = 200) -> list[dict[str, Any]]:
         return [dict(r) for r in self._query("SELECT * FROM logs ORDER BY id DESC LIMIT ?", (limit,))]
 
-    def lessons(self, limit: int = 100) -> list[dict[str, Any]]:
-        return [dict(r) for r in self._query("SELECT * FROM lessons ORDER BY id DESC LIMIT ?", (limit,))]
+    def lessons(self, limit: int = 100, scope: str | None = None) -> list[dict[str, Any]]:
+        if scope is None:
+            return [dict(r) for r in self._query("SELECT * FROM lessons ORDER BY id DESC LIMIT ?", (limit,))]
+        return [dict(r) for r in self._query("SELECT * FROM lessons WHERE scope=? ORDER BY id DESC LIMIT ?", (scope, limit))]

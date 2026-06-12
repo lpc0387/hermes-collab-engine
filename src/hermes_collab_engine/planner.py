@@ -5,14 +5,15 @@ import re
 import subprocess
 from pathlib import Path
 
-from .models import ComplexityScore, WBSNode
+from .models import ComplexityScore, Plan, WBSNode
 
 
 class Planner:
-    def __init__(self, cwd: Path, model: str | None = None, timeout: int = 120):
+    def __init__(self, cwd: Path, model: str | None = None, timeout: int = 120, store=None):
         self.cwd = cwd
         self.model = model
         self.timeout = timeout
+        self.store = store
 
     def assess(self, request: str) -> ComplexityScore:
         try:
@@ -89,21 +90,68 @@ No prose, no code fences outside the JSON, just the array.
                 routing = "wbs"
         return ComplexityScore(domain, steps, ambiguity, coupling, risk, overall, routing)
 
-    def decompose(self, request: str, max_nodes: int = 8) -> list[WBSNode]:
+    def _load_recent_lessons(self, limit: int = 6) -> str:
+        if self.store is None:
+            return ""
+        try:
+            lessons = self.store.lessons(limit=limit)
+        except Exception:
+            return ""
+        if not lessons:
+            return ""
+        lines = []
+        for lesson in lessons:
+            scope = lesson.get("scope") or "global"
+            if scope not in {"global", "project"}:
+                continue
+            category = lesson.get("category") or "general"
+            text = str(lesson.get("lesson") or "").strip()
+            if text:
+                lines.append(f"- [{scope}/{category}] {text}")
+        if not lines:
+            return ""
+        return "Recent planning lessons to apply:\n" + "\n".join(lines) + "\n\n"
+
+    def decompose(self, request: str, max_nodes: int = 8) -> Plan:
+        lessons_block = self._load_recent_lessons()
         prompt = f"""You are designing a WBS for a software collaboration engine implementation.
 
 Repository: {self.cwd}
-User request:
+{lessons_block}User request:
 {request}
 
-Return ONLY a JSON array of 4-{max_nodes} WBS nodes. Each node must have:
-id, title, description, capability, complexity (1-10), dependencies (array of ids), parallelizable (boolean), deliverable.
+Return ONLY one JSON object with this schema:
+{{
+  "shared_brief": "Short context all workers should share before their node-specific task.",
+  "nodes": [
+    {{
+      "id": "wbs-1",
+      "title": "Node title",
+      "description": "Detailed node task",
+      "capability": "analysis|planning|implementation|verification|general",
+      "complexity": 1,
+      "dependencies": ["wbs-1"],
+      "parallelizable": true,
+      "deliverable": "Expected worker output",
+      "brief": "Node-specific brief with scope, boundaries, and useful context.",
+      "estimated_duration": 300
+    }}
+  ]
+}}
+
+Create 4-{max_nodes} WBS nodes. complexity must be 1-10. estimated_duration is seconds and should be a positive integer.
 Design nodes so independent work can run in parallel while write-heavy implementation is sequenced safely.
+No prose, no code fences outside the JSON, just the object.
 """
         try:
             data = self._claude_json(prompt)
+            if isinstance(data, list):
+                data = {"nodes": data}
+            raw_nodes = data.get("nodes", []) if isinstance(data, dict) else []
             nodes = []
-            for i, item in enumerate(data[:max_nodes], 1):
+            for i, item in enumerate(raw_nodes[:max_nodes], 1):
+                if not isinstance(item, dict):
+                    continue
                 nodes.append(WBSNode(
                     id=str(item.get("id") or f"wbs-{i}"),
                     title=str(item.get("title") or f"WBS {i}"),
@@ -113,14 +161,17 @@ Design nodes so independent work can run in parallel while write-heavy implement
                     dependencies=list(item.get("dependencies") or []),
                     parallelizable=bool(item.get("parallelizable", True)),
                     deliverable=str(item.get("deliverable") or "Completed work"),
+                    brief=str(item.get("brief") or ""),
+                    estimated_duration=int(item["estimated_duration"]) if item.get("estimated_duration") is not None else None,
                 ))
             if nodes:
-                return nodes
+                shared_brief = str(data.get("shared_brief") or "") if isinstance(data, dict) else ""
+                return Plan(nodes=nodes, shared_brief=shared_brief)
         except Exception:
             pass
         return self.fallback_wbs(request)
 
-    def fallback_wbs(self, request: str) -> list[WBSNode]:
+    def fallback_wbs(self, request: str) -> Plan:
         snippet = request.strip()
         if len(snippet) > 1500:
             snippet = snippet[:1500] + "…"
@@ -139,6 +190,8 @@ Design nodes so independent work can run in parallel while write-heavy implement
                 [],
                 True,
                 "Requirements analysis and scope summary",
+                brief="Clarify requirements, constraints, affected areas, and verification needs before implementation begins.",
+                estimated_duration=300,
             ),
         ]
         if short:
@@ -151,6 +204,8 @@ Design nodes so independent work can run in parallel while write-heavy implement
                 ["wbs-1"],
                 False,
                 "Implemented solution",
+                brief="Use the analysis output to make the smallest safe code or documentation change that satisfies the request.",
+                estimated_duration=900,
             ))
             last_execute_id = "wbs-2"
         else:
@@ -163,6 +218,8 @@ Design nodes so independent work can run in parallel while write-heavy implement
                 ["wbs-1"],
                 True,
                 "Implementation plan",
+                brief="Turn the analysis into a concrete implementation strategy with sequencing, risks, and file-level focus.",
+                estimated_duration=600,
             ))
             nodes.append(WBSNode(
                 "wbs-3",
@@ -173,6 +230,8 @@ Design nodes so independent work can run in parallel while write-heavy implement
                 ["wbs-2"],
                 False,
                 "Implemented solution",
+                brief="Apply the planned changes while preserving existing behavior and coordinating write-heavy edits safely.",
+                estimated_duration=1200,
             ))
             last_execute_id = "wbs-3"
         nodes.append(WBSNode(
@@ -184,8 +243,14 @@ Design nodes so independent work can run in parallel while write-heavy implement
             [last_execute_id],
             False,
             "Verification report and documentation",
+            brief="Verify the completed work with targeted checks and document outcomes, including any skipped validation.",
+            estimated_duration=600,
         ))
-        return nodes
+        shared_brief = (
+            "Fallback plan generated without leader model output. Keep scope tight, pass useful findings through dependencies, "
+            "and report verification honestly."
+        )
+        return Plan(nodes=nodes, shared_brief=shared_brief)
 
     def _claude_json(self, prompt: str):
         cmd = ["claude", "-p", prompt, "--output-format", "json"]
@@ -199,7 +264,14 @@ Design nodes so independent work can run in parallel while write-heavy implement
         match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
         if match:
             text = match.group(1)
-        match = re.search(r"\[[\s\S]*\]", text)
-        if match:
-            text = match.group(0)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        object_match = re.search(r"\{[\s\S]*\}", text)
+        array_match = re.search(r"\[[\s\S]*\]", text)
+        matches = [m for m in (object_match, array_match) if m]
+        if matches:
+            match = min(matches, key=lambda m: m.start())
+            return json.loads(match.group(0))
         return json.loads(text)

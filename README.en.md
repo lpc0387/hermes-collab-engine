@@ -59,12 +59,17 @@ Hermes Collab Engine separates execution into a planning layer and an execution 
 ```text
 User
   ↓
-Official Hermes Agent
+Hermes Parent Agent
+  ├─ optional: delegate_task preflight analysis
   ↓ terminal tool
 Hermes Collab Engine
-  ↓ WBS / scheduler / SQLite / watchdog
+  ├─ Leader: complexity scoring / WBS / proactive split
+  ├─ Scheduler: stream scheduling / intervention control
+  ├─ SQLite: runs / nodes / logs / scoped lessons
+  └─ Watchdog: timeout sharding
+      ↓
 Claude Code Worker 1..N
-  ↓
+  ↓ dual-track output (machine result + human deliverable)
 Aggregated result
   ↓
 Returned to user
@@ -83,6 +88,15 @@ Returned to user
 | SQLite persistence | Stores execution history and state in a real SQLite database |
 | Self-learning lessons | Captures lessons from timeouts, slow tasks, failed runs, and interrupted runs |
 | Dashboard | Chinese web dashboard for runs, logs, workers, and lessons |
+| Leader-driven scoring | The Leader Agent scores complexity and decides the execution strategy by domain, steps, ambiguity, coupling, and risk |
+| Semantic compression decomposition | The Planner outputs a shared brief and node briefs, compressing large tasks into minimal context that Workers can execute |
+| Dual-track output | Workers produce both machine-parseable results and human-readable deliverables for scheduling, dashboard, and final reporting |
+| Tiered upstream context | Worker prompts automatically include parent, grandparent, and completed dependency results, keeping shard lineage traceable |
+| Stream-scheduled dispatch | The scheduler immediately dispatches nodes when dependencies are satisfied and worker slots are free, avoiding fixed batch barriers that slow downstream chains |
+| Proactive split | Nodes expected to time out or carry high risk can be split into focused shards before execution instead of waiting for timeout recovery |
+| Parent intervention | Parent / Operator can use the CLI to log, kill, split, and skip running nodes, with all actions written to the audit log |
+| Scoped lessons | Lessons carry global, project, run, node, and wbs-family scopes to prevent local lessons from polluting global planning |
+| Env-var model fallback | The CLI supports HERMES_COLLAB_MODEL, HERMES_COLLAB_LEADER_MODEL, HERMES_COLLAB_WORKER_MODEL, and ANTHROPIC_MODEL as model fallbacks |
 
 ## Self-upgrade sync policy
 
@@ -192,6 +206,40 @@ http://SERVER_IP:8765
 hermes-collab status --json
 ```
 
+### Manage lessons
+
+Write a scoped lesson:
+
+```bash
+hermes-collab lesson add \
+  --scope project \
+  --category planning \
+  --lesson "For similar tasks, split into analysis, implementation, and verification first" \
+  --source hermes-delegate-task \
+  --evidence-json '{"run_id":"run_xxx"}'
+```
+
+List lessons:
+
+```bash
+hermes-collab lesson list --scope project --json
+```
+
+Supported scopes: `global`, `project`, `run`, `node`, `wbs-family`.
+
+### In-run intervention
+
+Parent / Operator can use the CLI to perform controlled intervention on running nodes:
+
+```bash
+hermes-collab parent-log --run-id run_xxx --message "Manually confirmed continuation" --json
+hermes-collab split-node --node-id wbs-1 --split-count 4 --reason "Scope is too broad; proactively splitting" --json
+hermes-collab skip-node --node-id wbs-2 --reason "Upstream confirmed this no longer needs execution" --json
+hermes-collab kill-node --node-id wbs-3 --signal TERM --reason "Execution direction is wrong; stop retrying" --json
+```
+
+All interventions are written to logs, and the final report must disclose manual intervention, skipped work, cancellation, or forced progress.
+
 ## Dashboard
 
 The dashboard provides:
@@ -238,6 +286,8 @@ Tables:
 | `lessons` | Self-learning lessons |
 | `metrics` | Extension metrics |
 
+`lessons` have explicit scopes: `global` and `project` can be reused by later planning; `run`, `node`, and `wbs-family` are limited to the corresponding run, node, or WBS family, preventing local lessons from being misused as global rules.
+
 ## Timeout sharding strategy
 
 Default parameters:
@@ -258,6 +308,19 @@ When a worker times out, the system does not simply stop the task. It splits the
 | Risk shard | Identify blockers, unknowns, and verification needs |
 
 The shards are dispatched again and aggregated at the end.
+
+## Agent Communication Protocol
+
+This project uses ACP-Collab v0.2 to define the communication boundaries between the Hermes Parent agent, collaboration-engine Leader, Workers, and external preflight layers. See the full protocol in [Agent Communication Protocol](docs/agent-communication-protocol.md).
+
+Core conventions:
+
+- Request channel: Parent submits self-contained requests through CLI/API, and Workers do not assume they can read the parent session history;
+- Dual-Track Result channel: Worker output includes both machine-parseable results and human-readable deliverables;
+- Upstream-Context channel: Engine injects parent, grandparent, and completed dependency results into downstream Workers;
+- Scoped Lessons channel: lessons must carry source and scope, and the Planner only reuses lessons within their applicable scope;
+- Dispatch-Control channel: stream scheduling, proactive split, and in-run intervention are all recorded through CLI/API and the SQLite state machine;
+- Observability channel: runs, wbs_nodes, workers, logs, and lessons are the unified observation path for the dashboard and Parent.
 
 ## Hermes integration
 
@@ -309,6 +372,9 @@ hermes-collab-engine/
 │   └── store.py
 ├── web/
 │   └── index.html
+├── docs/
+│   ├── agent-communication-protocol.md
+│   └── self-upgrade-policy.md
 ├── examples/
 │   └── im-bridge-request.md
 └── data/

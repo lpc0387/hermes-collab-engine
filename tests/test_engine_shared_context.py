@@ -20,7 +20,10 @@ def make_node(
     dependencies: list[str] | None = None,
     parallelizable: bool = True,
     deliverable: str = "downstream deliverable",
+    wbs_index: int | None = None,
 ) -> WBSNode:
+    if wbs_index is not None and dependencies is None:
+        dependencies = [f"wbs-{wbs_index - 1}"] if wbs_index > 1 else []
     return WBSNode(
         id=node_id,
         title=title,
@@ -74,6 +77,17 @@ class EngineSharedContextTests(unittest.TestCase):
         self.assertIn("PARENT_RESULT_PAYLOAD", prompt)
         self.assertIn("from wbs-1", prompt)
 
+    def test_wbs_index_param_builds_previous_node_dependency(self) -> None:
+        self.engine._node_results["wbs-1"] = "INDEX_PARENT_PAYLOAD"
+        node = make_node(node_id="wbs-2", wbs_index=2)
+
+        prompt = self._run_with_mock(node)
+
+        self.assertEqual(node.dependencies, ["wbs-1"])
+        self.assertIn("Upstream context", prompt)
+        self.assertIn("INDEX_PARENT_PAYLOAD", prompt)
+        self.assertIn("from wbs-1", prompt)
+
     def test_no_upstream_context_when_results_empty(self) -> None:
         # dependencies declared but no recorded results from upstream
         node = make_node(node_id="wbs-2", dependencies=["wbs-1"])
@@ -81,6 +95,14 @@ class EngineSharedContextTests(unittest.TestCase):
 
         prompt = self._run_with_mock(node)
 
+        self.assertNotIn("Upstream context", prompt)
+
+    def test_wbs_index_one_keeps_empty_dependencies_for_backward_compat(self) -> None:
+        node = make_node(node_id="wbs-1", wbs_index=1)
+
+        prompt = self._run_with_mock(node)
+
+        self.assertEqual(node.dependencies, [])
         self.assertNotIn("Upstream context", prompt)
 
     def test_no_upstream_context_when_no_dependencies(self) -> None:

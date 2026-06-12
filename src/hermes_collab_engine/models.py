@@ -31,6 +31,8 @@ class WBSNode:
     status: str = "pending"
     parent_id: str | None = None
     attempt: int = 1
+    brief: str = ""
+    estimated_duration: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -47,6 +49,16 @@ class WorkerResult:
     returncode: int
     stderr: str
     attempt: int
+    result_struct: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Plan:
+    nodes: list[WBSNode]
+    shared_brief: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
