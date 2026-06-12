@@ -13,7 +13,7 @@ INDEX_HTML = Path(__file__).resolve().parents[2] / "web" / "index.html"
 
 
 class DashboardServer:
-    def __init__(self, host: str, port: int, db_path: str, cwd: str, model: str | None = None, leader_model: str | None = None, worker_model: str | None = None):
+    def __init__(self, host: str, port: int, db_path: str, cwd: str, model: str | None = None, leader_model: str | None = None, worker_model: str | None = None, agent: str = "claude-code"):
         self.host = host
         self.port = port
         self.db_path = db_path
@@ -21,6 +21,7 @@ class DashboardServer:
         self.model = model
         self.leader_model = leader_model
         self.worker_model = worker_model
+        self.agent = agent
         self.store = CollabStore(db_path)
 
     def serve(self) -> None:
@@ -54,6 +55,9 @@ class DashboardServer:
                     self._json(outer.store.recent_logs())
                 elif path == "/api/lessons":
                     self._json(outer.store.lessons())
+                elif path == "/api/agents":
+                    from .agents import detect_available_backends
+                    self._json([b.to_dict() for b in detect_available_backends()])
                 elif path == "/api/events":
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
@@ -84,7 +88,7 @@ class DashboardServer:
                     request = str(data.get("request") or "").strip()
                     if not request:
                         return self._json({"error": "request is required"}, 400)
-                    engine = CollabEngine(outer.db_path, outer.cwd, outer.model, leader_model=outer.leader_model, worker_model=outer.worker_model)
+                    engine = CollabEngine(outer.db_path, outer.cwd, outer.model, leader_model=outer.leader_model, worker_model=outer.worker_model, agent=outer.agent)
                     def run_async():
                         engine.run(
                             request,

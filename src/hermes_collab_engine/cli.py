@@ -79,7 +79,8 @@ def main() -> int:
     run.add_argument("--db", default="data/collab.sqlite3")
     run.add_argument("--model", help="Use the same model for leader and workers")
     run.add_argument("--leader-model", help="Leader brain model for planning and aggregation")
-    run.add_argument("--worker-model", help="Worker brain model for Claude Code workers")
+    run.add_argument("--worker-model", help="Worker brain model for coding workers")
+    run.add_argument("--agent", default="claude-code", help="Agent backend: claude-code (default), codex, opencode, or custom")
     run.add_argument("--concurrency", type=int, default=4)
     run.add_argument("--timeout", type=int, default=900)
     run.add_argument("--max-retries", type=int, default=2)
@@ -94,7 +95,8 @@ def main() -> int:
     server.add_argument("--db", default="data/collab.sqlite3")
     server.add_argument("--model", help="Use the same model for leader and workers")
     server.add_argument("--leader-model", help="Leader brain model for planning and aggregation")
-    server.add_argument("--worker-model", help="Worker brain model for Claude Code workers")
+    server.add_argument("--worker-model", help="Worker brain model for coding workers")
+    server.add_argument("--agent", default="claude-code", help="Agent backend: claude-code (default), codex, opencode, or custom")
 
     status = sub.add_parser("status", help="Show engine status")
     status.add_argument("--db", default="data/collab.sqlite3")
@@ -185,6 +187,11 @@ def main() -> int:
     save_snapshot.add_argument("--user-instructions", default=None, help="JSON array of user instruction strings")
     save_snapshot.add_argument("--json", action="store_true")
 
+    agents_cmd = sub.add_parser("agents", help="List available agent backends")
+    agents_cmd.add_argument("--db", default="data/collab.sqlite3")
+    agents_cmd.add_argument("--available", action="store_true", help="Only show agents on PATH")
+    agents_cmd.add_argument("--json", action="store_true")
+
     redo_node = sub.add_parser("redo-node", help="Create a redo node while keeping the source node for audit")
     redo_node.add_argument("--db", default="data/collab.sqlite3")
     redo_node.add_argument("--cwd", default=".")
@@ -223,7 +230,7 @@ def main() -> int:
     if args.cmd == "run":
         request = Path(args.request_file).read_text(encoding="utf-8") if args.request_file else " ".join(args.request)
         model, leader_model, worker_model = _model_options(args)
-        engine = CollabEngine(args.db, args.cwd, model, leader_model=leader_model, worker_model=worker_model)
+        engine = CollabEngine(args.db, args.cwd, model, leader_model=leader_model, worker_model=worker_model, agent=args.agent)
         result = engine.run(
             request,
             title=args.title,
@@ -243,7 +250,7 @@ def main() -> int:
 
     if args.cmd == "server":
         model, leader_model, worker_model = _model_options(args)
-        DashboardServer(args.host, args.port, args.db, args.cwd, model, leader_model=leader_model, worker_model=worker_model).serve()
+        DashboardServer(args.host, args.port, args.db, args.cwd, model, leader_model=leader_model, worker_model=worker_model, agent=args.agent).serve()
         return 0
 
     if args.cmd == "status":
@@ -254,6 +261,17 @@ def main() -> int:
             print(json.dumps(data, ensure_ascii=False, indent=2))
         else:
             print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.cmd == "agents":
+        from .agents import list_backends, detect_available_backends
+        backends = detect_available_backends() if args.available else list_backends()
+        if args.json:
+            print(json.dumps([b.to_dict() for b in backends], ensure_ascii=False, indent=2))
+        else:
+            for b in backends:
+                avail = "✓" if b.is_available() else "✗"
+                print(f"  {avail} {b.name:16s} {b.display_name:20s} parser={b.output_parser}")
         return 0
 
     if args.cmd == "lesson":
@@ -409,6 +427,13 @@ def main() -> int:
         run_id = args.run_id or row["run_id"]
 
         if args.cmd == "kill-node":
+            from .agents import get_backend
+            # Determine which agent was used for this run
+            agent_name = row.get("agent") if "agent" in row.keys() else "claude-code"
+            try:
+                backend = get_backend(agent_name)
+            except KeyError:
+                backend = get_backend("claude-code")
             patterns = [args.node_id, f"WBS node: {row['title']}"]
             pid_map: dict[int, str] = {}
             for pattern in patterns:
@@ -421,7 +446,7 @@ def main() -> int:
                         continue
                     if pid == os.getpid() or "pgrep" in cmdline:
                         continue
-                    if "claude" in cmdline and "--output-format" in cmdline:
+                    if backend.command[0] in cmdline:
                         pid_map[pid] = cmdline
             sig = {"TERM": signal.SIGTERM, "KILL": signal.SIGKILL, "INT": signal.SIGINT}[args.signal]
             killed = []

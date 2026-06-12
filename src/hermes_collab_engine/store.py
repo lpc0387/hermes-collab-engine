@@ -39,6 +39,7 @@ class CollabStore:
         self._migrate_lessons_scope()
         self._migrate_wbs_checkpoint()
         self._migrate_wbs_context_fields()
+        self._migrate_runs_agent()
 
     def _migrate_lessons_scope(self) -> None:
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(lessons)").fetchall()}
@@ -62,6 +63,11 @@ class CollabStore:
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+
+    def _migrate_runs_agent(self) -> None:
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)").fetchall()}
+        if "agent" not in columns:
+            self.conn.execute("ALTER TABLE runs ADD COLUMN agent TEXT DEFAULT 'claude-code'")
 
     def _execute(self, sql: str, params: tuple = ()):
         with self.lock:
@@ -116,9 +122,9 @@ class CollabStore:
             nodes = []
         return {"run_id": row["run_id"], "paused": bool(row["paused"]), "checkpoint_paused_nodes": [str(node) for node in nodes]}
 
-    def create_run(self, run_id: str, title: str, request: str, complexity: dict[str, Any]) -> None:
-        self._execute("INSERT INTO runs(id,title,request,status,complexity_json) VALUES(?,?,?,?,?)", (run_id, title, request, "created", json.dumps(complexity, ensure_ascii=False)))
-        self.log(run_id, "info", "run created", {"title": title})
+    def create_run(self, run_id: str, title: str, request: str, complexity: dict[str, Any], agent: str = "claude-code") -> None:
+        self._execute("INSERT INTO runs(id,title,request,status,complexity_json,agent) VALUES(?,?,?,?,?,?)", (run_id, title, request, "created", json.dumps(complexity, ensure_ascii=False), agent))
+        self.log(run_id, "info", "run created", {"title": title, "agent": agent})
 
     def update_run(self, run_id: str, status: str) -> None:
         completed_sql = ", completed_at=CURRENT_TIMESTAMP" if status in {"completed", "failed"} else ""

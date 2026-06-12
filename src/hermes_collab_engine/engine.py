@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .agents import get_backend, AgentBackend
 from .models import Plan, RiskPolicy, CheckpointDecision, WBSNode, WorkerResult
 from .planner import Planner
 from .store import CollabStore
@@ -29,10 +30,12 @@ class CollabEngine:
         model: str | None = None,
         leader_model: str | None = None,
         worker_model: str | None = None,
+        agent: str = "claude-code",
     ):
         self.cwd = Path(cwd).resolve()
         self.leader_model = leader_model or model
         self.worker_model = worker_model or model
+        self.agent_backend: AgentBackend = get_backend(agent)
         self.store = CollabStore(db_path)
         self.planner = Planner(self.cwd, model=self.leader_model, store=self.store)
         self._node_results: dict[str, str] = {}
@@ -81,7 +84,7 @@ class CollabEngine:
     def run(self, request: str, *, title: str | None = None, concurrency: int = 4, timeout: int = 900, max_retries: int = 2, split_count: int = 4, aggregate: bool = True) -> dict:
         run_id = "run_" + uuid.uuid4().hex[:12]
         score = self.planner.assess(request)
-        self.store.create_run(run_id, title or request[:80], request, score.to_dict())
+        self.store.create_run(run_id, title or request[:80], request, score.to_dict(), agent=self.agent_backend.name)
         self.store.update_run(run_id, "planning")
         self.store.log(run_id, "info", "complexity assessed", score.to_dict())
 
@@ -511,12 +514,13 @@ class CollabEngine:
     def _run_worker(self, run_id: str, node: WBSNode, timeout: int, model_override: str | None = None) -> WorkerResult:
         worker_id = f"worker_{run_id}_{node.id}_{node.attempt}"
         self.store.worker_start(worker_id, run_id, node.id)
-        self.store.log(run_id, "info", "worker started", {"node": node.id, "title": node.title}, node.id)
+        self.store.log(run_id, "info", "worker started", {"node": node.id, "title": node.title, "agent": self.agent_backend.name}, node.id)
         started = time.time()
         upstream_block = self._build_upstream_context(node)
         shared_brief_block = self._shared_brief_for_worker(node)
         brief_block = f"Brief:\n{node.brief}\n\n" if node.brief else ""
-        prompt = f"""You are a Claude Code worker in a Hermes collaboration engine.
+        backend = self.agent_backend
+        prompt = f"""{backend.prompt_prefix}
 
 WBS node: {node.title}
 Capability: {node.capability}
@@ -531,36 +535,14 @@ Return the deliverable. If you modify files, state exact paths. If read-only, do
 Output contract:
 - First, write the human-readable deliverable for the user.
 - On the final line, include exactly one machine-readable JSON object prefixed by {self._RESULT_MARKER}
-- Use this JSON shape: {{"status":"ok|blocked|failed","summary":"short result summary","files_modified":["path"],"verification":["command or check"],"notes":["optional note"]}}"""
-        allowed_tools = ",".join([
-            "Read",
-            "Edit",
-            "Write",
-            "MultiEdit",
-            "Bash(git diff*)",
-            "Bash(git status*)",
-            "Bash(git ls-files*)",
-            "Bash(git add*)",
-            "Bash(git commit*)",
-            "Bash(git push*)",
-            "Bash(python3 -m unittest*)",
-            "Bash(python3 -m py_compile*)",
-            "Bash(bash -n*)",
-        ])
-        cmd = [
-            "claude",
-            "-p",
-            prompt,
-            "--output-format",
-            "json",
-            "--permission-mode",
-            "acceptEdits",
-            "--allowedTools",
-            allowed_tools,
-        ]
+- Use this JSON shape: {{"status":"ok|blocked|failed","summary":"short result summary","files_modified":["path"],"verification":["command or check"],"notes":["optional note"]}}
+{backend.prompt_suffix}"""
         selected_model = model_override or self.worker_model
-        if selected_model:
-            cmd.extend(["--model", selected_model])
+        cmd = backend.build_command(
+            prompt=prompt,
+            model=selected_model,
+            allowed_tools=backend.default_allowed_tools,
+        )
         try:
             proc = subprocess.run(cmd, cwd=self.cwd, text=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
             duration = round(time.time() - started, 3)
@@ -572,15 +554,19 @@ Output contract:
             return result
 
         text = proc.stdout.strip()
-        session_id = None
-        ok = proc.returncode == 0
-        try:
-            parsed = json.loads(text)
-            text = str(parsed.get("result", text))
-            session_id = parsed.get("session_id")
-            ok = ok and not bool(parsed.get("is_error"))
-        except Exception:
-            pass
+        # Use agent backend to parse output
+        parsed = self.agent_backend.parse_output(
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            returncode=proc.returncode,
+            node_id=node.id,
+            node_title=node.title,
+            duration=duration,
+            attempt=node.attempt,
+        )
+        ok = parsed["ok"]
+        text = parsed["result"]
+        session_id = parsed["session_id"]
         result_struct, contract_error = self._parse_result_contract(text)
         if ok and contract_error:
             self.store.log(run_id, "warning", "worker result contract missing or invalid", {"node": node.id, "error": contract_error}, node.id)
