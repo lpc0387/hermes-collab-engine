@@ -57,6 +57,8 @@ class CollabStore:
             "ALTER TABLE wbs_nodes ADD COLUMN shared_brief TEXT DEFAULT ''",
             "ALTER TABLE wbs_nodes ADD COLUMN estimated_duration INTEGER DEFAULT NULL",
             "ALTER TABLE wbs_nodes ADD COLUMN result_struct_json TEXT DEFAULT NULL",
+            "ALTER TABLE wbs_nodes ADD COLUMN skills_json TEXT DEFAULT NULL",
+            "ALTER TABLE wbs_nodes ADD COLUMN tools_json TEXT DEFAULT NULL",
         ):
             try:
                 self.conn.execute(sql)
@@ -155,8 +157,8 @@ class CollabStore:
 
     def insert_wbs_node(self, run_id: str, node: dict[str, Any]) -> None:
         self._execute(
-            """INSERT OR REPLACE INTO wbs_nodes(id,run_id,parent_id,title,description,capability,complexity,dependencies_json,parallelizable,deliverable,brief,shared_brief,estimated_duration,result_struct_json,status,attempt,checkpoint,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-            (node["id"], run_id, node.get("parent_id"), node["title"], node["description"], node["capability"], node["complexity"], json.dumps(node.get("dependencies", []), ensure_ascii=False), 1 if node.get("parallelizable", True) else 0, node["deliverable"], node.get("brief", ""), node.get("shared_brief", ""), node.get("estimated_duration"), node.get("result_struct_json"), node.get("status", "pending"), node.get("attempt", 1), 1 if node.get("checkpoint", False) else 0),
+            """INSERT OR REPLACE INTO wbs_nodes(id,run_id,parent_id,title,description,capability,complexity,dependencies_json,parallelizable,deliverable,brief,shared_brief,estimated_duration,result_struct_json,skills_json,tools_json,status,attempt,checkpoint,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            (node["id"], run_id, node.get("parent_id"), node["title"], node["description"], node["capability"], node["complexity"], json.dumps(node.get("dependencies", []), ensure_ascii=False), 1 if node.get("parallelizable", True) else 0, node["deliverable"], node.get("brief", ""), node.get("shared_brief", ""), node.get("estimated_duration"), node.get("result_struct_json"), node.get("skills_json"), node.get("tools_json"), node.get("status", "pending"), node.get("attempt", 1), 1 if node.get("checkpoint", False) else 0),
         )
 
     def get_node(self, run_id: str, node_id: str) -> dict[str, Any] | None:
@@ -198,6 +200,9 @@ class CollabStore:
 
     def update_node(self, node_id: str, status: str, result: str | None = None, session_id: str | None = None, duration_seconds: float | None = None, error: str | None = None) -> None:
         self._execute("""UPDATE wbs_nodes SET status=?, result=COALESCE(?, result), session_id=COALESCE(?, session_id), duration_seconds=COALESCE(?, duration_seconds), error=COALESCE(?, error), updated_at=CURRENT_TIMESTAMP WHERE id=?""", (status, result, session_id, duration_seconds, error, node_id))
+
+    def update_node_skills_tools(self, node_id: str, skills_json: str | None = None, tools_json: str | None = None) -> None:
+        self._execute("""UPDATE wbs_nodes SET skills_json=COALESCE(?, skills_json), tools_json=COALESCE(?, tools_json), updated_at=CURRENT_TIMESTAMP WHERE id=?""", (skills_json, tools_json, node_id))
 
     def worker_start(self, worker_id: str, run_id: str, node_id: str) -> None:
         self._execute("INSERT OR REPLACE INTO workers(id,run_id,node_id,status,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)", (worker_id, run_id, node_id, "running"))

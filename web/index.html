@@ -1,104 +1,391 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Hermes 协同引擎管理面板</title>
-  <style>
-    :root{--bg:#f4f7fb;--card:#fff;--text:#172033;--muted:#667085;--line:#e6eaf2;--primary:#2563eb;--primary2:#1d4ed8;--ok:#16a34a;--bad:#dc2626;--warn:#d97706;--info:#0284c7;--shadow:0 8px 24px rgba(20,30,55,.08)}
-    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}header{background:linear-gradient(135deg,#10213f,#1d4ed8);color:#fff;padding:22px 28px;box-shadow:var(--shadow)}.top{max-width:1380px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:16px}.brand h1{font-size:24px;margin:0 0 6px}.brand p{margin:0;color:#dbeafe;font-size:14px}.live{padding:7px 12px;border-radius:999px;background:rgba(255,255,255,.14);font-size:13px}.container{max-width:1380px;margin:0 auto;padding:22px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:var(--shadow)}.metric{display:flex;align-items:center;justify-content:space-between}.metric .num{font-size:34px;font-weight:800;color:#1d4ed8}.metric .name{font-size:14px;color:var(--muted);margin-top:4px}.metric .icon{font-size:30px;background:#eef4ff;border-radius:14px;padding:10px}.section-title{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px}.section-title h2{font-size:18px;margin:0}.section-title p{margin:6px 0 0;color:var(--muted);font-size:13px;line-height:1.5}.form-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.field label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}.hint{font-size:12px;color:var(--muted);margin-top:5px;line-height:1.4}textarea,input{width:100%;border:1px solid #d6ddea;border-radius:12px;background:#fff;color:var(--text);padding:12px 13px;font-size:14px;outline:none}textarea:focus,input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.12)}textarea{resize:vertical;min-height:120px;line-height:1.55}.actions{display:flex;gap:10px;margin-top:14px;align-items:center}.btn{border:0;border-radius:12px;background:var(--primary);color:white;padding:11px 18px;font-weight:700;cursor:pointer}.btn:hover{background:var(--primary2)}.btn.secondary{background:#edf2ff;color:#1d4ed8}.notice{background:#f8fafc;border:1px dashed #cbd5e1;color:#475569;border-radius:12px;padding:12px;font-size:13px;line-height:1.55}.cols{display:grid;grid-template-columns:1.25fr .75fr;gap:16px}table{width:100%;border-collapse:collapse}th,td{padding:11px 10px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:top}th{background:#f8fafc;color:#475569;font-weight:800}.link{color:#2563eb;text-decoration:none;font-weight:700}.tag{display:inline-flex;padding:3px 9px;border-radius:999px;font-size:12px;font-weight:800}.tag.ok{background:#dcfce7;color:#166534}.tag.bad{background:#fee2e2;color:#991b1b}.tag.warn{background:#fef3c7;color:#92400e}.empty{padding:28px;text-align:center;color:var(--muted);background:#f8fafc;border-radius:12px}.logbox{background:#0f172a;color:#dbeafe;border-radius:14px;padding:14px;min-height:220px;max-height:420px;overflow:auto;font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;line-height:1.55;white-space:pre-wrap}.detail{background:#f8fafc;border:1px solid var(--line);border-radius:14px;padding:14px;white-space:pre-wrap;max-height:520px;overflow:auto;font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;line-height:1.55}.small{font-size:12px;color:var(--muted)}@media(max-width:900px){.grid,.form-grid,.cols{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.container{padding:14px}}
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hermes Collab Engine v4.5</title>
+<style>
+:root{
+  --bg:#0d1117;--surface:#161b22;--surface2:#1c2333;--border:#30363d;
+  --text:#e6edf3;--muted:#7d8590;--primary:#58a6ff;--primary2:#388bfd;
+  --ok:#3fb950;--bad:#f85149;--warn:#d29922;--info:#58a6ff;--purple:#bc8cff;
+  --shadow:0 2px 12px rgba(0,0,0,.4);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.5}
+header{background:var(--surface);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;align-items:center;justify-content:space-between}
+.brand h1{font-size:20px;font-weight:700;color:var(--text)}
+.brand span{color:var(--muted);font-size:13px;margin-left:8px}
+.live-dot{width:8px;height:8px;border-radius:50%;background:var(--ok);display:inline-block;margin-right:6px;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* Metrics bar */
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:16px 24px}
+.metric{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;display:flex;align-items:center;gap:12px}
+.metric .icon{font-size:24px;width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center}
+.metric .icon.runs{background:#1a2a3a;color:var(--info)}
+.metric .icon.running{background:#1a2a1a;color:var(--ok)}
+.metric .icon.workers{background:#2a1a2a;color:var(--purple)}
+.metric .icon.lessons{background:#2a2a1a;color:var(--warn)}
+.metric .num{font-size:28px;font-weight:800}
+.metric .label{font-size:12px;color:var(--muted)}
+
+/* Main layout: pipeline + sidebar */
+.main{display:grid;grid-template-columns:1fr 320px;gap:16px;padding:0 24px 24px}
+
+/* Pipeline zone */
+.pipeline-zone{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.zone-header{padding:12px 16px;font-size:14px;font-weight:700;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.zone-header .sub{font-weight:400;color:var(--muted);font-size:12px}
+
+.pipeline-lanes{display:flex;min-height:400px}
+.lane{flex:1;border-right:1px solid var(--border);padding:12px;min-width:0}
+.lane:last-child{border-right:none}
+.lane-title{text-align:center;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);padding-bottom:8px;border-bottom:1px solid var(--border);margin-bottom:8px;letter-spacing:.5px}
+.lane-title .count{background:var(--surface2);padding:2px 6px;border-radius:4px;font-size:10px;margin-left:4px}
+.lane-title.planning{color:var(--warn)}
+.lane-title.running{color:var(--info)}
+.lane-title.done{color:var(--ok)}
+.lane-title.failed{color:var(--bad)}
+
+/* Node cards */
+.node-card{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer;transition:border-color .2s,box-shadow .2s;font-size:12px}
+.node-card:hover{border-color:var(--primary);box-shadow:0 0 0 1px var(--primary)}
+.node-card .title{font-weight:700;font-size:13px;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node-card .cap{color:var(--muted);font-size:11px;margin-bottom:6px}
+.node-card .badges{display:flex;flex-wrap:wrap;gap:4px}
+.badge{display:inline-flex;align-items:center;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700}
+.badge.skill{background:#1a2a3a;color:var(--info)}
+.badge.tool{background:#2a1a2a;color:var(--purple)}
+.badge.agent{background:#2a2a1a;color:var(--warn)}
+.badge.status-ok{background:#1a2a1a;color:var(--ok)}
+.badge.status-err{background:#2a1a1a;color:var(--bad)}
+.badge.status-run{background:#1a2a3a;color:var(--info)}
+.badge.status-wait{background:#1a1a1a;color:var(--muted)}
+
+/* Worker cards (sidebar) */
+.sidebar{display:flex;flex-direction:column;gap:12px}
+.sidebar-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.sidebar-card .zone-header{font-size:13px}
+
+.worker-card{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;font-size:12px}
+.worker-card:last-child{border-bottom:none}
+.worker-avatar{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;flex-shrink:0}
+.worker-avatar.claude-code{background:#1a3a2a;color:var(--ok)}
+.worker-avatar.codex{background:#1a2a3a;color:var(--info)}
+.worker-avatar.opencode{background:#2a1a2a;color:var(--purple)}
+.worker-info{flex:1;min-width:0}
+.worker-info .name{font-weight:700;font-size:13px}
+.worker-info .detail{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.worker-status{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.worker-status.active{background:var(--ok);animation:pulse 2s infinite}
+.worker-status.idle{background:var(--muted)}
+.worker-status.error{background:var(--bad)}
+
+/* Skill/Tool preview */
+.preview-section{padding:14px}
+.preview-controls{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.preview-controls input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 10px;font-size:12px;outline:none}
+.preview-controls input:focus{border-color:var(--primary)}
+.preview-btn{grid-column:1/-1;background:var(--primary2);color:#fff;border:none;border-radius:6px;padding:7px;font-size:12px;font-weight:700;cursor:pointer}
+.preview-btn:hover{background:var(--primary)}
+.skill-item,.tool-item{padding:6px 0;border-bottom:1px solid var(--border);font-size:12px}
+.skill-item:last-child,.tool-item:last-child{border-bottom:none}
+.skill-item .sname,.tool-item .tname{font-weight:700;color:var(--text)}
+.skill-item .sdesc,.tool-item .tdesc{color:var(--muted);font-size:11px;margin-top:2px}
+.tool-item .ttools{color:var(--purple);font-size:10px;margin-top:2px;font-family:monospace}
+.empty-msg{color:var(--muted);font-size:12px;text-align:center;padding:16px}
+
+/* Runs table */
+.runs-section{padding:0 24px 24px}
+.runs-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+table{width:100%;border-collapse:collapse}
+th{background:var(--surface2);padding:10px 12px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
+td{padding:10px 12px;font-size:13px;border-bottom:1px solid var(--border)}
+tr:last-child td{border-bottom:none}
+.link{color:var(--primary);text-decoration:none;font-weight:700}
+.link:hover{text-decoration:underline}
+.tag{display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700}
+.tag.ok{background:#1a2a1a;color:var(--ok)}
+.tag.bad{background:#2a1a1a;color:var(--bad)}
+.tag.warn{background:#2a2a1a;color:var(--warn)}
+
+/* Detail panel */
+.detail-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:100;display:none;align-items:center;justify-content:center}
+.detail-overlay.show{display:flex}
+.detail-panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;width:90%;max-width:900px;max-height:85vh;overflow:auto;padding:20px}
+.detail-panel h2{font-size:18px;margin-bottom:4px}
+.detail-panel .sub{color:var(--muted);font-size:13px;margin-bottom:16px}
+.detail-panel pre{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;overflow:auto;max-height:400px;font-family:"SFMono-Regular",Consolas,monospace;line-height:1.6;white-space:pre-wrap}
+.close-btn{float:right;background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer}
+.close-btn:hover{color:var(--text)}
+
+@media(max-width:900px){
+  .metrics{grid-template-columns:repeat(2,1fr)}
+  .main{grid-template-columns:1fr}
+  .pipeline-lanes{flex-direction:column}
+}
+</style>
 </head>
 <body>
+
 <header>
-  <div class="top">
-    <div class="brand">
-      <h1>⚕ Hermes 协同引擎管理面板</h1>
-      <p>用于监控任务拆解、执行器运行、超时重试、日志和自学习经验。</p>
-    </div>
-    <div class="live" id="live">正在连接实时状态...</div>
-  </div>
+  <div class="brand"><h1>Hermes Collab Engine<span>v4.5</span></h1></div>
+  <div style="font-size:13px;color:var(--muted)"><span class="live-dot"></span>实时监控</div>
 </header>
 
-<div class="container">
-  <div class="grid">
-    <div class="card metric"><div><div class="num" id="runs">-</div><div class="name">总运行次数</div></div><div class="icon">📦</div></div>
-    <div class="card metric"><div><div class="num" id="running">-</div><div class="name">正在运行</div></div><div class="icon">⚙️</div></div>
-    <div class="card metric"><div><div class="num" id="workers">-</div><div class="name">运行中执行器</div></div><div class="icon">🤖</div></div>
-    <div class="card metric"><div><div class="num" id="lessons">-</div><div class="name">学习经验</div></div><div class="icon">🧠</div></div>
+<div class="metrics">
+  <div class="metric"><div class="icon runs">📊</div><div><div class="num" id="mRuns">0</div><div class="label">运行总数</div></div></div>
+  <div class="metric"><div class="icon running">▶</div><div><div class="num" id="mRunning">0</div><div class="label">进行中</div></div></div>
+  <div class="metric"><div class="icon workers">🤖</div><div><div class="num" id="mWorkers">0</div><div class="label">活跃 Worker</div></div></div>
+  <div class="metric"><div class="icon lessons">💡</div><div><div class="num" id="mLessons">0</div><div class="label">经验教训</div></div></div>
+</div>
+
+<div class="main">
+  <!-- Pipeline -->
+  <div class="pipeline-zone">
+    <div class="zone-header">
+      <span>📋 协同流水线</span>
+      <span class="sub" id="pipelineSummary">加载中...</span>
+    </div>
+    <div class="pipeline-lanes">
+      <div class="lane"><div class="lane-title planning">规划中 <span class="count" id="cntPlan">0</span></div><div id="lanePlan"></div></div>
+      <div class="lane"><div class="lane-title running">执行中 <span class="count" id="cntRun">0</span></div><div id="laneRun"></div></div>
+      <div class="lane"><div class="lane-title done">已完成 <span class="count" id="cntDone">0</span></div><div id="laneDone"></div></div>
+      <div class="lane"><div class="lane-title failed">失败 <span class="count" id="cntFail">0</span></div><div id="laneFail"></div></div>
+    </div>
   </div>
 
-  <div class="card">
-    <div class="section-title">
-      <div>
-        <h2>启动协同任务</h2>
-        <p>输入一个目标，系统会自动判断复杂度；复杂任务会拆成工作分解节点，并行分发给 Claude Code 执行器。超时任务会自动拆成更小的分片重试。</p>
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <!-- Workers -->
+    <div class="sidebar-card">
+      <div class="zone-header">🤖 Worker 池 <span class="sub" id="workerSummary">0 在线</span></div>
+      <div id="workerPool"><div class="empty-msg">暂无活跃 Worker</div></div>
+    </div>
+
+    <!-- Skill/Tool Preview -->
+    <div class="sidebar-card">
+      <div class="zone-header">🧠 技能 & 工具预览</div>
+      <div class="preview-section">
+        <div class="preview-controls">
+          <input id="prevNodeType" value="implementation" placeholder="节点能力"/>
+          <input id="prevTask" value="implement and verify" placeholder="任务描述"/>
+          <button class="preview-btn" onclick="previewCapabilities()">预览选择</button>
+        </div>
+        <div id="skillsBox"><div class="empty-msg">点击预览查看技能</div></div>
+        <div id="toolsBox"><div class="empty-msg">点击预览查看工具</div></div>
       </div>
     </div>
-    <div class="field">
-      <label for="request">任务目标</label>
-      <textarea id="request" placeholder="例如：阅读 /root/im-bridge/docs/hermes-framework 的设计文档，重新设计并实现一个独立协同引擎，要求支持工作分解、SQLite 持久化、执行器监控和管理面板。"></textarea>
-      <div class="hint">请尽量写清楚目标、约束、参考路径和期望交付物。</div>
-    </div>
-    <div class="form-grid" style="margin-top:14px">
-      <div class="field"><label for="concurrency">并行执行器数量</label><input id="concurrency" type="number" min="1" max="16" value="4" placeholder="例如：4"/><div class="hint">同时运行的 Claude Code 执行器数量。</div></div>
-      <div class="field"><label for="timeout">单个执行器超时秒数</label><input id="timeout" type="number" min="30" value="900" placeholder="例如：900"/><div class="hint">超过该时间会触发超时守护。</div></div>
-      <div class="field"><label for="max_retries">最大重试轮数</label><input id="max_retries" type="number" min="0" value="2" placeholder="例如：2"/><div class="hint">超时或失败后最多重试/拆分几轮。</div></div>
-      <div class="field"><label for="split_count">超时拆分数量</label><input id="split_count" type="number" min="1" value="4" placeholder="例如：4"/><div class="hint">超时任务会拆成多少个聚焦分片。</div></div>
-    </div>
-    <div class="actions">
-      <button class="btn" onclick="startRun()">启动任务</button>
-      <button class="btn secondary" onclick="fillExample()">填入示例</button>
-      <span class="small" id="submitStatus"></span>
-    </div>
   </div>
+</div>
 
-  <div class="cols">
-    <div class="card">
-      <div class="section-title"><div><h2>运行记录</h2><p>点击运行编号可查看 WBS 节点、执行器、日志等详细信息。</p></div></div>
-      <div id="runsTable" class="empty">正在加载运行记录...</div>
-    </div>
-    <div class="card">
-      <div class="section-title"><div><h2>运行详情</h2><p>展示选中运行的数据库记录。</p></div></div>
-      <div id="detailBox" class="detail">尚未选择运行。</div>
-    </div>
+<!-- Runs -->
+<div class="runs-section">
+  <div class="runs-card">
+    <div class="zone-header" style="padding:12px 16px">📜 运行记录</div>
+    <div id="runsTable"><div class="empty-msg">加载中...</div></div>
   </div>
+</div>
 
-  <div class="cols">
-    <div class="card"><div class="section-title"><div><h2>实时日志</h2><p>最近的结构化日志，包含任务、节点、执行器和错误信息。</p></div></div><div id="logs" class="logbox">正在加载日志...</div></div>
-    <div class="card"><div class="section-title"><div><h2>自学习经验</h2><p>系统从超时、慢任务和失败中沉淀的经验。</p></div></div><div id="lessonsBox" class="logbox">正在加载经验...</div></div>
+<!-- Detail Overlay -->
+<div class="detail-overlay" id="detailOverlay">
+  <div class="detail-panel">
+    <button class="close-btn" onclick="closeDetail()">&times;</button>
+    <h2 id="detailTitle"></h2>
+    <div class="sub" id="detailSub"></div>
+    <div id="detailContent"></div>
   </div>
 </div>
 
 <script>
-async function getJSON(url){const r=await fetch(url);return await r.json()}
-function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
-function statusText(s){return s==='completed'?'已完成':s==='failed'?'失败':s==='running'?'运行中':s==='planning'?'规划中':s==='created'?'已创建':s}
-function statusClass(s){return s==='completed'?'ok':s==='failed'?'bad':'warn'}
+const API='';
+async function getJSON(u){const r=await fetch(API+u);return await r.json()}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function statusTag(s){const m={completed:['ok','✓ 完成'],failed:['bad','✗ 失败'],running:['warn','▶ 运行中'],planning:['warn','◎ 规划中'],created:['warn','○ 已创建']};const d=m[s]||['warn',s];return `<span class="tag ${d[0]}">${d[1]}</span>`}
+function statusBadge(s){const m={completed:'status-ok',failed:'status-err',running:'status-run'};return m[s]||'status-wait'}
+function agentBadge(a){const names={claude_code:'CC',codex:'CX',opencode:'OC'};const short=names[a]||a?.substring(0,2).toUpperCase()||'?';return `<span class="badge agent">${esc(short)}</span>`}
+
+function nodeCard(n){
+  const badges=[
+    n.agent?agentBadge(n.agent):'',
+    `<span class="badge ${statusBadge(n.status)}">${esc(n.status)}</span>`,
+    ...(n.skills||[]).map(s=>`<span class="badge skill">${esc(s)}</span>`),
+    ...(n.tools||[]).map(t=>`<span class="badge tool">${esc(t)}</span>`),
+  ].filter(Boolean).join('');
+  return `<div class="node-card" onclick="showNode('${esc(n.run_id)}','${esc(n.id)}')">
+    <div class="title">${esc(n.title)}</div>
+    <div class="cap">${esc(n.capability||'')}${n.deliverable?' · '+esc(n.deliverable).substring(0,40):''}</div>
+    <div class="badges">${badges}</div>
+  </div>`;
+}
+
+function workerCard(w){
+  const agentType=(w.agent||'claude-code').replace(/[^a-z0-9-]/gi,'-');
+  const statusCls=w.status==='running'?'active':w.status==='failed'?'error':'idle';
+  const emoji=agentType.includes('claude')?'🟢':agentType.includes('codex')?'🔵':'🟣';
+  return `<div class="worker-card">
+    <div class="worker-avatar ${esc(agentType)}">${emoji}</div>
+    <div class="worker-info">
+      <div class="name">${esc(w.agent||'worker')}</div>
+      <div class="detail">${esc(w.node_title||w.node_id||'idle')}</div>
+    </div>
+    <div class="worker-status ${statusCls}"></div>
+  </div>`;
+}
+
+let currentRunId=null;
+let currentNodes=[];
+
 async function refresh(){
   try{
     const o=await getJSON('/api/overview');
-    runs.textContent=o.runs; running.textContent=o.running; workers.textContent=o.workers_running; lessons.textContent=o.lessons;
+    document.getElementById('mRuns').textContent=o.runs;
+    document.getElementById('mRunning').textContent=o.running;
+    document.getElementById('mWorkers').textContent=o.workers_running;
+    document.getElementById('mLessons').textContent=o.lessons;
+
     const rs=await getJSON('/api/runs');
-    if(!rs.length){runsTable.innerHTML='<div class="empty">暂无运行记录。</div>'}else{
-      runsTable.innerHTML='<table><tr><th>运行编号</th><th>状态</th><th>标题</th><th>创建时间</th></tr>'+rs.map(r=>`<tr><td><a class="link" href="#" onclick="detail('${r.id}')">${r.id}</a></td><td><span class="tag ${statusClass(r.status)}">${statusText(r.status)}</span></td><td>${esc(r.title)}</td><td>${r.created_at}</td></tr>`).join('')+'</table>';
+    if(!rs.length){
+      document.getElementById('runsTable').innerHTML='<div class="empty-msg">暂无运行记录</div>';
+    }else{
+      let rows=rs.map(r=>`<tr>
+        <td><a class="link" href="#" onclick="showRunDetail('${r.id}');return false">${r.id.substring(0,12)}</a></td>
+        <td>${statusTag(r.status)}</td>
+        <td>${esc(r.title)}</td>
+        <td style="color:var(--muted);font-size:12px">${r.created_at||''}</td>
+      </tr>`).join('');
+      document.getElementById('runsTable').innerHTML=`<table><tr><th>编号</th><th>状态</th><th>标题</th><th>创建</th></tr>${rows}</table>`;
     }
-    const lg=await getJSON('/api/logs'); logs.textContent=lg.length?lg.map(l=>`[${l.created_at}] ${l.level} ${l.run_id||''} ${l.node_id||''}\n${l.message}`).join('\n\n'):'暂无日志';
-    const le=await getJSON('/api/lessons'); lessonsBox.textContent=le.length?le.map(l=>`[${l.created_at}] ${l.category}\n${l.lesson}`).join('\n\n'):'暂无学习经验';
-  }catch(e){live.textContent='连接失败';}
+
+    // Show latest run's pipeline
+    const latestRun=rs.find(r=>r.status==='running')||rs[0];
+    if(latestRun){
+      currentRunId=latestRun.id;
+      await loadPipeline(latestRun.id);
+    }
+  }catch(e){console.error('refresh error',e)}
 }
-async function detail(id){ const d=await getJSON('/api/runs/'+id); detailBox.textContent=JSON.stringify(d,null,2); }
-async function startRun(){
-  const text=request.value.trim(); if(!text){submitStatus.textContent='请先填写任务目标。'; return;}
-  submitStatus.textContent='正在提交...';
-  await fetch('/api/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request:text,concurrency:+concurrency.value,timeout:+timeout.value,max_retries:+max_retries.value,split_count:+split_count.value,aggregate:true})});
-  request.value=''; submitStatus.textContent='已提交，运行状态会自动刷新。'; refresh();
+
+async function loadPipeline(runId){
+  const detail=await getJSON('/api/runs/'+runId);
+  if(!detail||!detail.nodes){return}
+  currentNodes=detail.nodes||[];
+  const lanes={planning:[],running:[],done:[],failed:[]};
+  currentNodes.forEach(n=>{
+    if(n.status==='running')lanes.running.push(n);
+    else if(n.status==='pending'||n.status==='created'||n.status==='scheduled')lanes.planning.push(n);
+    else if(n.status==='completed'||n.status==='skipped')lanes.done.push(n);
+    else if(n.status==='failed'||n.status==='timeout')lanes.failed.push(n);
+    else lanes.planning.push(n);
+  });
+  document.getElementById('lanePlan').innerHTML=lanes.planning.map(nodeCard).join('')||'<div class="empty-msg">无</div>';
+  document.getElementById('laneRun').innerHTML=lanes.running.map(nodeCard).join('')||'<div class="empty-msg">无</div>';
+  document.getElementById('laneDone').innerHTML=lanes.done.map(nodeCard).join('')||'<div class="empty-msg">无</div>';
+  document.getElementById('laneFail').innerHTML=lanes.failed.map(nodeCard).join('')||'<div class="empty-msg">无</div>';
+  document.getElementById('cntPlan').textContent=lanes.planning.length;
+  document.getElementById('cntRun').textContent=lanes.running.length;
+  document.getElementById('cntDone').textContent=lanes.done.length;
+  document.getElementById('cntFail').textContent=lanes.failed.length;
+  const total=currentNodes.length;
+  const done=lanes.done.length;
+  const fail=lanes.failed.length;
+  document.getElementById('pipelineSummary').textContent=`${done}/${total} 完成, ${lanes.running.length} 执行中, ${fail} 失败`;
+
+  // Worker pool from logs
+  const logs=await getJSON('/api/logs');
+  const workers={};
+  (logs||[]).forEach(l=>{
+    if(l.message==='worker started'&&l.data){
+      const wid=l.data.node||'';
+      const agent=l.data.agent||'claude-code';
+      workers[wid]={agent,node_id:wid,node_title:l.data.title};
+    }
+  });
+  // For running nodes, show as active workers
+  const activeWorkers=currentNodes.filter(n=>n.status==='running').map(n=>({agent:(detail.run||{}).agent||'claude-code',node_id:n.id,node_title:n.title,status:'running'}));
+  const workerList=Object.values(activeWorkers.length?activeWorkers:Object.values(workers));
+  document.getElementById('workerSummary').textContent=`${workerList.length} 在线`;
+  document.getElementById('workerPool').innerHTML=workerList.length?workerList.map(workerCard).join(''):'<div class="empty-msg">暂无活跃 Worker</div>';
 }
-function fillExample(){request.value='阅读 /root/im-bridge/docs/hermes-framework 的设计文档，设计一个独立协同引擎，要求自主判断复杂度、WBS 拆解、并行执行器分发、SQLite 持久化、超时拆分重试、自学习经验和管理面板。不要修改 im-bridge。';}
-const es=new EventSource('/api/events');
-es.onmessage=e=>{live.textContent='实时连接正常'; const d=JSON.parse(e.data); runs.textContent=d.overview.runs; running.textContent=d.overview.running; workers.textContent=d.overview.workers_running; lessons.textContent=d.overview.lessons;};
-es.onerror=()=>live.textContent='实时连接重连中';
-refresh(); setInterval(refresh,5000);
+
+async function previewCapabilities(){
+  const nt=encodeURIComponent(document.getElementById('prevNodeType').value.trim());
+  const tk=encodeURIComponent(document.getElementById('prevTask').value.trim());
+  const qs=nt?`?node_type=${nt}&task=${tk}`:'';
+  const ss=await getJSON('/api/skills'+qs);
+  const ts=await getJSON('/api/tools'+qs);
+  if(!ss.length)document.getElementById('skillsBox').innerHTML='<div class="empty-msg">无匹配技能</div>';
+  else document.getElementById('skillsBox').innerHTML=ss.map(s=>`<div class="skill-item"><div class="sname">${esc(s.display_name)} <span class="badge skill">p${s.priority}</span></div><div class="sdesc">${esc(s.description)}</div></div>`).join('');
+  if(!ts.length)document.getElementById('toolsBox').innerHTML='<div class="empty-msg">无匹配工具</div>';
+  else document.getElementById('toolsBox').innerHTML=ts.map(p=>`<div class="tool-item"><div class="tname">${esc(p.display_name)} <span class="badge tool">p${p.priority}</span>${p.mcp_tools&&p.mcp_tools.length?'<span class="badge tool">MCP</span>':''}</div><div class="tdesc">${esc(p.description)}</div><div class="ttools">${esc((p.allowed_tools||[]).join(', '))}</div></div>`).join('');
+}
+
+async function showRunDetail(runId){
+  const detail=await getJSON('/api/runs/'+runId);
+  if(!detail){return}
+  document.getElementById('detailTitle').textContent=detail.title||runId;
+  document.getElementById('detailSub').textContent=`${runId} · ${statusTag(detail.status)} · ${detail.created_at||''}`;
+  let html='<h3 style="margin:12px 0 8px;font-size:14px">WBS 节点</h3>';
+  if(detail.nodes&&detail.nodes.length){
+    html+='<table><tr><th>ID</th><th>标题</th><th>能力</th><th>状态</th></tr>';
+    detail.nodes.forEach(n=>{
+      html+=`<tr><td>${esc(n.id)}</td><td>${esc(n.title)}</td><td>${esc(n.capability||'')}</td><td>${statusTag(n.status)}</td></tr>`;
+    });
+    html+='</table>';
+  }else{html+='<div class="empty-msg">无节点</div>'}
+  if(detail.logs&&detail.logs.length){
+    html+='<h3 style="margin:16px 0 8px;font-size:14px">日志</h3><pre>';
+    detail.logs.slice(-30).forEach(l=>{html+=`[${l.level||''}] ${l.message||''} ${l.data?JSON.stringify(l.data):''}\n`});
+    html+='</pre>';
+  }
+  document.getElementById('detailContent').innerHTML=html;
+  document.getElementById('detailOverlay').classList.add('show');
+  // Also load pipeline for this run
+  await loadPipeline(runId);
+}
+
+async function showNode(runId,nodeId){
+  const detail=await getJSON('/api/runs/'+runId);
+  if(!detail){return}
+  const node=(detail.nodes||[]).find(n=>n.id===nodeId);
+  if(!node){return}
+  document.getElementById('detailTitle').textContent=node.title;
+  document.getElementById('detailSub').textContent=`${node.id} · ${node.capability} · ${statusTag(node.status)}`;
+  let html='';
+  if(node.deliverable)html+=`<p style="margin-bottom:8px"><strong>交付物:</strong> ${esc(node.deliverable)}</p>`;
+  if(node.brief)html+=`<p style="margin-bottom:8px"><strong>Brief:</strong> ${esc(node.brief)}</p>`;
+  if(node.description)html+=`<p style="margin-bottom:8px"><strong>描述:</strong> ${esc(node.description)}</p>`;
+  if(node.result)html+=`<h3 style="margin:12px 0 8px;font-size:14px">结果</h3><pre>${esc(node.result)}</pre>`;
+  // Skills & tools from logs
+  const nodeLogs=(detail.logs||[]).filter(l=>l.node_id===nodeId);
+  const skillLog=nodeLogs.find(l=>l.message==='worker skills selected');
+  const toolLog=nodeLogs.find(l=>l.message==='worker tool profiles selected');
+  if(skillLog||toolLog){
+    html+='<h3 style="margin:12px 0 8px;font-size:14px">技能 & 工具</h3><div style="display:flex;flex-wrap:wrap;gap:6px">';
+    if(skillLog&&skillLog.data&&skillLog.data.skills)skillLog.data.skills.forEach(s=>{html+=`<span class="badge skill">${esc(s)}</span>`});
+    if(toolLog&&toolLog.data&&toolLog.data.profiles)toolLog.data.profiles.forEach(p=>{html+=`<span class="badge tool">${esc(p)}</span>`});
+    html+='</div>';
+  }
+  document.getElementById('detailContent').innerHTML=html;
+  document.getElementById('detailOverlay').classList.add('show');
+}
+
+function closeDetail(){document.getElementById('detailOverlay').classList.remove('show')}
+
+// Initial load + SSE
+refresh();
+const evtSource=new EventSource('/api/events');
+evtSource.onmessage=function(e){
+  try{const d=JSON.parse(e.data);if(d.overview){
+    document.getElementById('mRuns').textContent=d.overview.runs;
+    document.getElementById('mRunning').textContent=d.overview.running;
+    document.getElementById('mWorkers').textContent=d.overview.workers_running;
+    document.getElementById('mLessons').textContent=d.overview.lessons;
+  }}catch(err){}
+};
+// Full refresh every 10s
+setInterval(refresh,10000);
 </script>
 </body>
 </html>

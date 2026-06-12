@@ -4,7 +4,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .engine import CollabEngine
 from .store import CollabStore
@@ -23,6 +23,18 @@ class DashboardServer:
         self.worker_model = worker_model
         self.agent = agent
         self.store = CollabStore(db_path)
+
+    def skills_payload(self, node_type: str = "", task: str = "") -> list[dict]:
+        from .skills import get_default_registry
+        registry = get_default_registry()
+        skills = registry.select_for_node(node_type, task) if node_type else registry.list_all()
+        return [skill.to_dict() for skill in skills]
+
+    def tools_payload(self, node_type: str = "", task: str = "") -> list[dict]:
+        from .tools import get_default_tool_registry
+        registry = get_default_tool_registry()
+        profiles = registry.select_for_node(node_type, task) if node_type else registry.list_all()
+        return [profile.to_dict() for profile in profiles]
 
     def serve(self) -> None:
         outer = self
@@ -58,6 +70,16 @@ class DashboardServer:
                 elif path == "/api/agents":
                     from .agents import detect_available_backends
                     self._json([b.to_dict() for b in detect_available_backends()])
+                elif path == "/api/skills":
+                    query = parse_qs(urlparse(self.path).query)
+                    node_type = (query.get("node_type") or [""])[0]
+                    task = (query.get("task") or [""])[0]
+                    self._json(outer.skills_payload(node_type, task))
+                elif path == "/api/tools":
+                    query = parse_qs(urlparse(self.path).query)
+                    node_type = (query.get("node_type") or [""])[0]
+                    task = (query.get("task") or [""])[0]
+                    self._json(outer.tools_payload(node_type, task))
                 elif path == "/api/events":
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")

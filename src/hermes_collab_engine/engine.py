@@ -12,7 +12,9 @@ from typing import Any
 from .agents import get_backend, AgentBackend
 from .models import Plan, RiskPolicy, CheckpointDecision, WBSNode, WorkerResult
 from .planner import Planner
+from .skills import SkillRegistry, get_default_registry
 from .store import CollabStore
+from .tools import ToolRegistry, get_default_tool_registry
 
 
 class CollabEngine:
@@ -31,11 +33,15 @@ class CollabEngine:
         leader_model: str | None = None,
         worker_model: str | None = None,
         agent: str = "claude-code",
+        skill_registry: SkillRegistry | None = None,
+        tool_registry: ToolRegistry | None = None,
     ):
         self.cwd = Path(cwd).resolve()
         self.leader_model = leader_model or model
         self.worker_model = worker_model or model
         self.agent_backend: AgentBackend = get_backend(agent)
+        self.skill_registry = skill_registry or get_default_registry()
+        self.tool_registry = tool_registry or get_default_tool_registry()
         self.store = CollabStore(db_path)
         self.planner = Planner(self.cwd, model=self.leader_model, store=self.store)
         self._node_results: dict[str, str] = {}
@@ -511,6 +517,21 @@ class CollabEngine:
             return ""
         return f"Shared brief:\n{plan.shared_brief}\n\n"
 
+    def _task_text_for_worker(self, node: WBSNode) -> str:
+        return "\n".join(part for part in (node.title, node.deliverable, node.brief, node.description) if part)
+
+    def _skills_for_worker(self, node: WBSNode) -> tuple[list[str], str]:
+        selected = self.skill_registry.select_for_node(node.capability, self._task_text_for_worker(node))
+        return [skill.name for skill in selected], self.skill_registry.render_for_prompt(selected)
+
+    def _tools_for_worker(self, node: WBSNode) -> tuple[list[str], list[str], str]:
+        profiles = self.tool_registry.select_for_node(node.capability, self._task_text_for_worker(node))
+        return (
+            [profile.name for profile in profiles],
+            self.tool_registry.allowed_tools_for_profiles(profiles),
+            self.tool_registry.render_for_prompt(profiles),
+        )
+
     def _run_worker(self, run_id: str, node: WBSNode, timeout: int, model_override: str | None = None) -> WorkerResult:
         worker_id = f"worker_{run_id}_{node.id}_{node.attempt}"
         self.store.worker_start(worker_id, run_id, node.id)
@@ -519,14 +540,29 @@ class CollabEngine:
         upstream_block = self._build_upstream_context(node)
         shared_brief_block = self._shared_brief_for_worker(node)
         brief_block = f"Brief:\n{node.brief}\n\n" if node.brief else ""
+        skill_names, skills_block = self._skills_for_worker(node)
+        tool_profile_names, tool_allowed, tools_block = self._tools_for_worker(node)
         backend = self.agent_backend
+        # Tool manager acts as whitelist: if profiles matched, use only their tools;
+        # if no profiles matched, fall back to backend defaults
+        if tool_allowed:
+            final_allowed = tool_allowed
+        else:
+            final_allowed = list(backend.default_allowed_tools)
+        if skill_names:
+            self.store.log(run_id, "info", "worker skills selected", {"node": node.id, "skills": skill_names}, node.id)
+        if tool_profile_names:
+            self.store.log(run_id, "info", "worker tool profiles selected", {"node": node.id, "profiles": tool_profile_names, "allowed_tools": final_allowed}, node.id)
+        # Persist skills/tools to node for dashboard display
+        import json as _json
+        self.store.update_node_skills_tools(node.id, _json.dumps(skill_names), _json.dumps(tool_profile_names))
         prompt = f"""{backend.prompt_prefix}
 
 WBS node: {node.title}
 Capability: {node.capability}
 Deliverable: {node.deliverable}
 
-{shared_brief_block}{brief_block}{upstream_block}Task:
+{skills_block}{tools_block}{shared_brief_block}{brief_block}{upstream_block}Task:
 {node.description}
 
 Work in cwd: {self.cwd}
@@ -538,15 +574,36 @@ Output contract:
 - Use this JSON shape: {{"status":"ok|blocked|failed","summary":"short result summary","files_modified":["path"],"verification":["command or check"],"notes":["optional note"]}}
 {backend.prompt_suffix}"""
         selected_model = model_override or self.worker_model
-        cmd = backend.build_command(
-            prompt=prompt,
-            model=selected_model,
-            allowed_tools=backend.default_allowed_tools,
-        )
+        # If prompt is too long for command-line args, use stdin via temp file
+        _PROMPT_ARG_MAX = 100_000  # conservative limit for -p argument
+        use_stdin = len(prompt.encode("utf-8", errors="replace")) > _PROMPT_ARG_MAX
+        tmp_path: str | None = None
+        if use_stdin:
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8")
+            tmp.write(prompt)
+            tmp.close()
+            tmp_path = tmp.name
+            cmd = backend.build_command(
+                prompt="",  # empty -p, actual content via stdin
+                model=selected_model,
+                allowed_tools=final_allowed,
+            )
+        else:
+            cmd = backend.build_command(
+                prompt=prompt,
+                model=selected_model,
+                allowed_tools=final_allowed,
+            )
         try:
-            proc = subprocess.run(cmd, cwd=self.cwd, text=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            stdin_data = open(tmp_path, "r").read() if tmp_path else None
+            proc = subprocess.run(cmd, cwd=self.cwd, text=True, stdin=subprocess.PIPE if use_stdin else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, input=stdin_data)
             duration = round(time.time() - started, 3)
         except subprocess.TimeoutExpired as exc:
+            if tmp_path:
+                import os
+                try: os.unlink(tmp_path)
+                except OSError: pass
             duration = round(time.time() - started, 3)
             result = WorkerResult(node.id, node.title, False, f"Timed out after {timeout}s", None, duration, 124, (exc.stderr or "") if isinstance(exc.stderr, str) else "", node.attempt)
             self.store.worker_finish(worker_id, "timeout", duration, None, result.result)
@@ -578,6 +635,10 @@ Output contract:
         result = WorkerResult(node.id, node.title, ok, text, session_id, duration, proc.returncode, proc.stderr.strip(), node.attempt, result_struct)
         self.store.worker_finish(worker_id, "completed" if ok else "failed", duration, session_id, None if ok else text)
         self.store.log(run_id, "info" if ok else "error", "worker finished", result.to_dict(), node.id)
+        if tmp_path:
+            import os
+            try: os.unlink(tmp_path)
+            except OSError: pass
         return result
 
     def _parse_result_contract(self, text: str) -> tuple[dict[str, Any] | None, str | None]:

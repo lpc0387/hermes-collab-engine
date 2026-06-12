@@ -192,6 +192,19 @@ def main() -> int:
     agents_cmd.add_argument("--available", action="store_true", help="Only show agents on PATH")
     agents_cmd.add_argument("--json", action="store_true")
 
+    skills_cmd = sub.add_parser("skills", help="List worker prompt skills")
+    skills_cmd.add_argument("--node-type", help="Preview skills selected for a node capability")
+    skills_cmd.add_argument("--task", default="", help="Task text used with --node-type selection")
+    skills_cmd.add_argument("--json", action="store_true")
+
+    tools_cmd = sub.add_parser("tools", help="List worker tool and MCP profiles")
+    tools_cmd.add_argument("--node-type", help="Preview tool profiles selected for a node capability")
+    tools_cmd.add_argument("--task", default="", help="Task text used with --node-type selection")
+    tools_cmd.add_argument("--json", action="store_true")
+
+    verify_v45 = sub.add_parser("verify-v45", help="Run local checks for v4.5 skill/tool/dashboard features")
+    verify_v45.add_argument("--json", action="store_true")
+
     redo_node = sub.add_parser("redo-node", help="Create a redo node while keeping the source node for audit")
     redo_node.add_argument("--db", default="data/collab.sqlite3")
     redo_node.add_argument("--cwd", default=".")
@@ -273,6 +286,54 @@ def main() -> int:
                 avail = "✓" if b.is_available() else "✗"
                 print(f"  {avail} {b.name:16s} {b.display_name:20s} parser={b.output_parser}")
         return 0
+
+    if args.cmd == "skills":
+        from .skills import get_default_registry
+        registry = get_default_registry()
+        if args.node_type:
+            skills = registry.select_for_node(args.node_type, args.task)
+        else:
+            skills = registry.list_all()
+        if args.json:
+            print(json.dumps([skill.to_dict() for skill in skills], ensure_ascii=False, indent=2))
+        else:
+            for skill in skills:
+                node_types = ",".join(skill.applicable_node_types)
+                print(f"  {skill.name:22s} p{skill.priority} {skill.category:12s} [{node_types}] {skill.display_name}")
+        return 0
+
+    if args.cmd == "tools":
+        from .tools import get_default_tool_registry
+        registry = get_default_tool_registry()
+        if args.node_type:
+            profiles = registry.select_for_node(args.node_type, args.task)
+        else:
+            profiles = registry.list_all()
+        if args.json:
+            print(json.dumps([profile.to_dict() for profile in profiles], ensure_ascii=False, indent=2))
+        else:
+            for profile in profiles:
+                node_types = ",".join(profile.applicable_node_types)
+                mcp = " mcp" if profile.mcp_tools else ""
+                print(f"  {profile.name:22s} p{profile.priority} {profile.category:12s}{mcp:4s} [{node_types}] {profile.display_name}")
+        return 0
+
+    if args.cmd == "verify-v45":
+        from .verification import verify_v45_capabilities
+        report = verify_v45_capabilities()
+        data = report.to_dict()
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            print(f"v4.5 verification: {report.status}")
+            for check in report.checks:
+                marker = "✓" if check.status == "passed" else "✗"
+                print(f"  {marker} {check.name}: {check.detail}")
+            if report.skipped:
+                print("Skipped:")
+                for item in report.skipped:
+                    print(f"  - {item}")
+        return 0 if report.status == "ok" else 1
 
     if args.cmd == "lesson":
         from .store import CollabStore
