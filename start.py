@@ -13,6 +13,63 @@ ROOT = Path(__file__).resolve().parent
 HERMES_DIR = Path.home() / '.hermes'
 CLAUDE_DIR = Path.home() / '.claude'
 
+VERSION = 'v4.5'
+GITHUB_URL = 'https://github.com/lpc0387/hermes-collab-engine'
+TAGLINE_ZH = '多 Agent 协同引擎 · Leader 拆解 · Worker 并行 · 面板可视化'
+TAGLINE_EN = 'Multi-agent collab engine · Leader plans · Workers run in parallel · Live dashboard'
+
+
+def _supports_color() -> bool:
+    if os.environ.get('NO_COLOR'):
+        return False
+    if os.environ.get('FORCE_COLOR'):
+        return True
+    return hasattr(__import__('sys').stdout, 'isatty') and __import__('sys').stdout.isatty()
+
+
+def print_banner() -> None:
+    """Render the launcher banner: project name, tagline, GitHub link, version."""
+    use_color = _supports_color()
+    C = {
+        'reset': '\033[0m' if use_color else '',
+        'cyan':  '\033[38;5;51m'  if use_color else '',
+        'blue':  '\033[38;5;75m'  if use_color else '',
+        'mag':   '\033[38;5;213m' if use_color else '',
+        'gray':  '\033[38;5;245m' if use_color else '',
+        'green': '\033[38;5;120m' if use_color else '',
+        'bold':  '\033[1m'         if use_color else '',
+        'dim':   '\033[2m'         if use_color else '',
+    }
+
+    # Compact ASCII logo — readable at 80 cols, Hermes caduceus motif on the side.
+    logo_lines = [
+        " _   _                                ____      _ _       _     ",
+        "| | | | ___ _ __ _ __ ___   ___  ___ / ___|___ | | | __ _| |__  ",
+        "| |_| |/ _ \\ '__| '_ ` _ \\ / _ \\/ __| |   / _ \\| | |/ _` | '_ \\ ",
+        "|  _  |  __/ |  | | | | | |  __/\\__ \\ |__| (_) | | | (_| | |_) |",
+        "|_| |_|\\___|_|  |_| |_| |_|\\___||___/\\____\\___/|_|_|\\__,_|_.__/ ",
+        "                          E N G I N E                            ",
+    ]
+
+    width = max(len(line) for line in logo_lines)
+    bar = '─' * width
+
+    print()
+    print(f"{C['gray']}{bar}{C['reset']}")
+    for line in logo_lines:
+        print(f"{C['cyan']}{C['bold']}{line}{C['reset']}")
+    print(f"{C['gray']}{bar}{C['reset']}")
+    print(f"  {C['mag']}{C['bold']}Hermes Collab Engine{C['reset']}  "
+          f"{C['green']}{VERSION}{C['reset']}  "
+          f"{C['dim']}{C['gray']}— 协同引擎启动器 / Launcher{C['reset']}")
+    print(f"  {C['blue']}▸{C['reset']} {C['gray']}{TAGLINE_ZH}{C['reset']}")
+    print(f"  {C['blue']}▸{C['reset']} {C['gray']}{TAGLINE_EN}{C['reset']}")
+    print(f"  {C['blue']}⌬{C['reset']} {C['cyan']}GitHub:{C['reset']} "
+          f"{C['bold']}{GITHUB_URL}{C['reset']}")
+    print(f"{C['gray']}{bar}{C['reset']}")
+    print()
+
+
 DEFAULT_MODELS = [
     'kimi-k2.6', 'glm-5.1', 'deepseek-v4-pro', 'deepseek-v4-flash',
     'doubao-seed-2.0-lite', 'doubao-seed-2.0-pro', 'doubao-seed-2.0-code',
@@ -295,7 +352,7 @@ def stop_existing_server():
 
 
 def main():
-    print('⚕ Hermes 协同引擎启动器 v4.5')
+    print_banner()
 
     # Build config source options dynamically
     hermes_auto = get_config_from_hermes()
