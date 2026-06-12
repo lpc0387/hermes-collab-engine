@@ -36,12 +36,47 @@ class CollabEngine:
         self.store = CollabStore(db_path)
         self.planner = Planner(self.cwd, model=self.leader_model, store=self.store)
         self._node_results: dict[str, str] = {}
-        self._node_results_struct: dict[str, dict[str, Any]] = {}
+        self._node_results_struct: dict[str, dict[str, Any] | None] = {}
         self._node_results_lock = threading.Lock()
         self._current_plan: Plan | None = None
+        self._risk_assessments: list[dict[str, Any]] = []
         self._checkpoint_paused_nodes: set[str] = set()
         self._paused_runs: set[str] = set()
         self._file_allowlist: set[str] = set()
+        self._restore_all_run_states()
+
+    def _persist_run_state(self, run_id: str) -> None:
+        self.store.save_run_state(run_id, run_id in self._paused_runs, self._checkpoint_paused_nodes)
+
+    def _restore_all_run_states(self) -> None:
+        states = self.store.load_run_state()
+        if not isinstance(states, list):
+            return
+        self._paused_runs = {state["run_id"] for state in states if state["paused"]}
+        self._checkpoint_paused_nodes = {
+            node_id
+            for state in states
+            for node_id in state["checkpoint_paused_nodes"]
+        }
+
+    def _restore_run_state(self, run_id: str) -> None:
+        state = self.store.load_run_state(run_id)
+        if not state:
+            return
+        if state["paused"]:
+            self._paused_runs.add(run_id)
+        else:
+            self._paused_runs.discard(run_id)
+        self._checkpoint_paused_nodes = set(state["checkpoint_paused_nodes"])
+
+    def restore_run_state(self, run_id: str) -> dict:
+        self._restore_run_state(run_id)
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "paused": run_id in self._paused_runs,
+            "checkpoint_paused_nodes": sorted(self._checkpoint_paused_nodes),
+        }
 
     def run(self, request: str, *, title: str | None = None, concurrency: int = 4, timeout: int = 900, max_retries: int = 2, split_count: int = 4, aggregate: bool = True) -> dict:
         run_id = "run_" + uuid.uuid4().hex[:12]
@@ -66,8 +101,12 @@ class CollabEngine:
             self._current_plan = plan
             self._node_results = {}
             self._node_results_struct = {}
+        self._risk_assessments = []
         for node in nodes:
-            self.store.insert_wbs_node(run_id, node.to_dict())
+            node_data = node.to_dict()
+            node_data["shared_brief"] = plan.shared_brief
+            self.store.insert_wbs_node(run_id, node_data)
+        self._restore_run_state(run_id)
         self.store.update_run(run_id, "running")
 
         try:
@@ -203,6 +242,7 @@ class CollabEngine:
                 self._current_plan = None
                 self._node_results = {}
                 self._node_results_struct = {}
+            self._risk_assessments = []
             self._checkpoint_paused_nodes.clear()
             self._paused_runs.discard(run_id)
 
@@ -229,7 +269,7 @@ class CollabEngine:
         parent = self._run_worker(run_id, node, timeout)
         self.store.update_node(node.id, "completed" if parent.ok else "failed", parent.result, parent.session_id, parent.duration_seconds, None if parent.ok else parent.result)
         if parent.ok:
-            self._record_node_result(parent)
+            self._record_node_result(run_id, parent)
         results = [parent]
         if parent.ok:
             return results
@@ -250,7 +290,7 @@ class CollabEngine:
                     results.append(res)
                     self.store.update_node(res.node_id, "completed" if res.ok else "failed", res.result, res.session_id, res.duration_seconds, None if res.ok else res.result)
                     if res.ok:
-                        self._record_node_result(res)
+                        self._record_node_result(run_id, res)
             # Phase 2: run implementation shards (with phase 1 upstream context)
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(phase2), 4)) as pool:
                 futs = {pool.submit(self._run_worker, run_id, s, timeout): s for s in phase2}
@@ -260,14 +300,52 @@ class CollabEngine:
                     results.append(res)
                     self.store.update_node(res.node_id, "completed" if res.ok else "failed", res.result, res.session_id, res.duration_seconds, None if res.ok else res.result)
                     if res.ok:
-                        self._record_node_result(res)
+                        self._record_node_result(run_id, res)
         return results
 
-    def _record_node_result(self, result: WorkerResult) -> None:
+    def _record_node_result(self, run_id: str, result: WorkerResult) -> None:
+        result_text = result.result or ''
         with self._node_results_lock:
-            self._node_results[result.node_id] = result.result or ''
-            if result.result_struct is not None:
-                self._node_results_struct[result.node_id] = result.result_struct
+            self._node_results[result.node_id] = result_text
+            self._node_results_struct[result.node_id] = result.result_struct
+            for node in self._current_plan.nodes if self._current_plan else []:
+                if node.id == result.node_id:
+                    node.status = "completed" if result.ok else "failed"
+                    break
+        self.store.save_node_result(run_id, result.node_id, result_text, result.result_struct)
+        self._save_context_snapshot(run_id, "node_completed", result.node_id)
+
+    def _save_context_snapshot(self, run_id: str, snapshot_type: str, node_id: str | None = None) -> None:
+        self.store.save_context_snapshot(run_id, snapshot_type, self._build_context_snapshot(run_id), node_id)
+
+    def _build_context_snapshot(self, run_id: str) -> dict[str, Any]:
+        plan = self._current_plan
+        nodes: dict[str, dict[str, Any]] = {}
+        with self._node_results_lock:
+            result_structs = dict(self._node_results_struct)
+            result_texts = dict(self._node_results)
+        for row in self.store.get_nodes(run_id):
+            node_id = row["id"]
+            result_struct = result_structs.get(node_id)
+            node_snapshot: dict[str, Any] = {"status": row.get("status", "pending")}
+            if result_struct:
+                quality = result_struct.get("status")
+                if node_snapshot["status"] == "completed" and quality is not None:
+                    node_snapshot["quality"] = quality
+                key_facts = result_struct.get("key_facts") or result_struct.get("summary")
+                if key_facts is not None:
+                    node_snapshot["key_facts"] = key_facts
+            elif node_id in result_texts:
+                node_snapshot["key_facts"] = result_texts[node_id]
+            nodes[node_id] = node_snapshot
+        return {
+            "plan_summary": plan.shared_brief if plan else "",
+            "nodes": nodes,
+            "decisions": [],
+            "risk_assessments": list(self._risk_assessments),
+            "user_instructions": [],
+            "pending_actions": sorted(self._checkpoint_paused_nodes),
+        }
 
     def _split_node(self, node: WBSNode, split_count: int) -> list[WBSNode]:
         """Split an over-budget node into shards.
@@ -551,6 +629,7 @@ Output contract:
     def pause_run(self, run_id: str, *, reason: str | None = None) -> dict:
         """Stop dispatching new nodes. Running workers continue to completion."""
         self._paused_runs.add(run_id)
+        self._persist_run_state(run_id)
         self.store.log(run_id, "pause", f"Run paused by parent{': '+reason if reason else ''}")
         return {"ok": True, "run_id": run_id, "action": "paused"}
 
@@ -558,6 +637,7 @@ Output contract:
         """Resume dispatching nodes after a pause."""
         self._paused_runs.discard(run_id)
         self._checkpoint_paused_nodes.clear()
+        self._persist_run_state(run_id)
         self.store.log(run_id, "resume", f"Run resumed by parent{': '+reason if reason else ''}")
         return {"ok": True, "run_id": run_id, "action": "resumed"}
 
@@ -582,6 +662,8 @@ Output contract:
         """Apply the configured risk policy to detected risks."""
         for risk_level, desc in risks:
             action = getattr(risk_policy, risk_level, "auto")
+            assessment = {"risk_level": risk_level, "description": desc, "action": action}
+            self._risk_assessments.append(assessment)
             self.store.log(run_id, "risk", f"[{risk_level}] {desc} (action={action})")
             if action in ("notify", "pause"):
                 # Find which node this risk is about (extract from desc)
@@ -600,12 +682,15 @@ Output contract:
                         self._auto_resume_checkpoint,
                         args=(run_id, node_id),
                     ).start()
+                self._persist_run_state(run_id)
+                self._save_context_snapshot(run_id, "checkpoint", node_id or None)
                 # action == "pause" requires explicit resume
 
     def _auto_resume_checkpoint(self, run_id: str, node_id: str) -> None:
         """Auto-resume a checkpoint after timeout if still paused."""
         if node_id in self._checkpoint_paused_nodes:
             self._checkpoint_paused_nodes.discard(node_id)
+            self._persist_run_state(run_id)
             self.store.log(run_id, "checkpoint", f"Auto-resumed {node_id} after timeout", node_id=node_id)
             risk_policy = self.store.load_risk_policy()
             self.store.add_lesson(
@@ -620,15 +705,11 @@ Output contract:
         If cascade=True, also redo all downstream nodes that depend on this node.
         """
         plan = self._load_plan_from_db(run_id)
+        with self._node_results_lock:
+            self._current_plan = plan
         node = next((n for n in plan.nodes if n.id == node_id), None)
         if not node:
             raise ValueError(f"Node {node_id} not found in run {run_id}")
-
-        # Load upstream context
-        with self._node_results_lock:
-            old_results = dict(self._node_results)
-            old_structs = dict(self._node_results_struct)
-        upstream_ctx = self._build_upstream_context(node)
 
         # Increment attempt
         node.attempt += 1
@@ -636,7 +717,7 @@ Output contract:
 
         # Re-run the worker with same prompt
         result = self._run_worker(run_id, node, 900, model_override=worker_model)
-        self._record_node_result(result)
+        self._record_node_result(run_id, result)
         self.store.update_node_result(run_id, node_id, result.result or "")
 
         # If cascade, find and redo all downstream nodes
@@ -648,7 +729,7 @@ Output contract:
                     ds_node.attempt += 1
                     self.store.update_node_attempt(run_id, ds_node_id, ds_node.attempt)
                     ds_result = self._run_worker(run_id, ds_node, 900, model_override=worker_model)
-                    self._record_node_result(ds_result)
+                    self._record_node_result(run_id, ds_result)
                     self.store.update_node_result(run_id, ds_node_id, ds_result.result or "")
 
         # Write lesson
@@ -676,6 +757,15 @@ Output contract:
     def _load_plan_from_db(self, run_id: str) -> Plan:
         """Reconstruct a Plan object from stored WBS nodes."""
         nodes_data = self.store.get_nodes(run_id)
+        loaded_results: dict[str, str] = {}
+        loaded_structs: dict[str, dict[str, Any] | None] = {}
+        for row in self.store.load_node_results(run_id):
+            loaded_results[row["node_id"]] = row.get("result_text") or ""
+            raw_struct = row.get("result_struct_json")
+            loaded_structs[row["node_id"]] = json.loads(raw_struct) if raw_struct else None
+        with self._node_results_lock:
+            self._node_results = loaded_results
+            self._node_results_struct = loaded_structs
         wbs_nodes: list[WBSNode] = []
         shared_brief = ""
         for n in nodes_data:

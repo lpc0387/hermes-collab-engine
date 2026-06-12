@@ -54,6 +54,30 @@ class RedoNodeTests(unittest.TestCase):
             self.assertEqual(row["attempt"], 2)
             self.assertEqual(row["result"], "new result")
 
+    def test_record_node_result_persists_mirror_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = CollabEngine(Path(tmp) / "db.sqlite3", tmp)
+            result = WorkerResult(
+                "wbs-1",
+                "title",
+                True,
+                "result text",
+                None,
+                0.01,
+                0,
+                "",
+                1,
+                {"summary": "structured"},
+            )
+
+            engine._record_node_result("run_1", result)
+
+            rows = engine.store.load_node_results("run_1")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["node_id"], "wbs-1")
+            self.assertEqual(rows[0]["result_text"], "result text")
+            self.assertEqual(json.loads(rows[0]["result_struct_json"]), {"summary": "structured"})
+
     def test_redo_with_cascade_also_redownstream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = CollabEngine(Path(tmp) / "db.sqlite3", tmp)
@@ -111,10 +135,41 @@ class RedoNodeTests(unittest.TestCase):
             self.assertEqual(loaded.dependencies, ["wbs-0"])
             self.assertTrue(loaded.checkpoint)
             self.assertEqual(loaded.attempt, 3)
-            self.assertEqual(loaded.brief, "")
-            self.assertEqual(loaded.estimated_duration, None)
+            self.assertEqual(loaded.brief, "Brief wbs-1")
+            self.assertEqual(loaded.estimated_duration, 120)
             stored = engine.store.get_node("run_1", "wbs-1")
             self.assertEqual(json.loads(stored["dependencies_json"]), ["wbs-0"])
+
+    def test_load_plan_from_db_restores_node_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = CollabEngine(Path(tmp) / "db.sqlite3", tmp)
+            seed_run(engine, [make_node("wbs-1"), make_node("wbs-2")])
+            engine.store.save_node_result("run_1", "wbs-1", "text result", {"summary": "structured"})
+            engine.store.save_node_result("run_1", "wbs-2", "plain result", None)
+            engine._node_results = {}
+            engine._node_results_struct = {}
+
+            engine._load_plan_from_db("run_1")
+
+            self.assertEqual(engine._node_results, {"wbs-1": "text result", "wbs-2": "plain result"})
+            self.assertEqual(engine._node_results_struct, {"wbs-1": {"summary": "structured"}, "wbs-2": None})
+
+    def test_redo_node_uses_restored_structured_upstream_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = CollabEngine(Path(tmp) / "db.sqlite3", tmp)
+            seed_run(engine, [make_node("wbs-1"), make_node("wbs-2", ["wbs-1"])])
+            engine.store.save_node_result("run_1", "wbs-1", "verbose text", {"summary": "structured parent"})
+            prompts: list[str] = []
+
+            def fake_run_worker(run_id, current, timeout, model_override=None):
+                prompts.append(engine._build_upstream_context(current))
+                return WorkerResult(current.id, current.title, True, "new result", None, 0.01, 0, "", current.attempt)
+
+            engine._run_worker = fake_run_worker
+
+            engine.redo_node("run_1", "wbs-2")
+
+            self.assertIn("summary: structured parent", prompts[0])
 
 
 if __name__ == "__main__":

@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEX
 CREATE TABLE IF NOT EXISTS lessons (id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT NOT NULL DEFAULT 'global',category TEXT NOT NULL,lesson TEXT NOT NULL,evidence_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS metrics (key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS node_results (node_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,result_text TEXT DEFAULT '',result_struct_json TEXT DEFAULT NULL,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS run_state (run_id TEXT PRIMARY KEY,paused INTEGER DEFAULT 0,checkpoint_paused_nodes_json TEXT DEFAULT '[]',updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS context_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,snapshot_type TEXT NOT NULL,node_id TEXT DEFAULT NULL,snapshot_json TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 """
 
 
@@ -35,6 +38,7 @@ class CollabStore:
     def _ensure_schema(self) -> None:
         self._migrate_lessons_scope()
         self._migrate_wbs_checkpoint()
+        self._migrate_wbs_context_fields()
 
     def _migrate_lessons_scope(self) -> None:
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(lessons)").fetchall()}
@@ -45,6 +49,19 @@ class CollabStore:
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(wbs_nodes)").fetchall()}
         if "checkpoint" not in columns:
             self.conn.execute("ALTER TABLE wbs_nodes ADD COLUMN checkpoint INTEGER NOT NULL DEFAULT 0")
+
+    def _migrate_wbs_context_fields(self) -> None:
+        for sql in (
+            "ALTER TABLE wbs_nodes ADD COLUMN brief TEXT DEFAULT ''",
+            "ALTER TABLE wbs_nodes ADD COLUMN shared_brief TEXT DEFAULT ''",
+            "ALTER TABLE wbs_nodes ADD COLUMN estimated_duration INTEGER DEFAULT NULL",
+            "ALTER TABLE wbs_nodes ADD COLUMN result_struct_json TEXT DEFAULT NULL",
+        ):
+            try:
+                self.conn.execute(sql)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
 
     def _execute(self, sql: str, params: tuple = ()):
         with self.lock:
@@ -75,6 +92,29 @@ class CollabStore:
 
     def load_risk_policy(self) -> RiskPolicy:
         return RiskPolicy.from_dict(self.get_setting("risk_policy"))
+
+    def save_run_state(self, run_id: str, paused: bool, checkpoint_paused_nodes: set[str] | list[str]) -> None:
+        nodes_json = json.dumps(sorted(checkpoint_paused_nodes), ensure_ascii=False)
+        self._execute(
+            "INSERT OR REPLACE INTO run_state(run_id,paused,checkpoint_paused_nodes_json,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP)",
+            (run_id, 1 if paused else 0, nodes_json),
+        )
+
+    def load_run_state(self, run_id: str | None = None) -> dict[str, Any] | list[dict[str, Any]] | None:
+        if run_id is None:
+            rows = self._query("SELECT run_id,paused,checkpoint_paused_nodes_json FROM run_state")
+            return [self._run_state_from_row(row) for row in rows]
+        row = self._one("SELECT run_id,paused,checkpoint_paused_nodes_json FROM run_state WHERE run_id=?", (run_id,))
+        return self._run_state_from_row(row) if row else None
+
+    def _run_state_from_row(self, row) -> dict[str, Any]:
+        try:
+            nodes = json.loads(row["checkpoint_paused_nodes_json"] or "[]")
+        except json.JSONDecodeError:
+            nodes = []
+        if not isinstance(nodes, list):
+            nodes = []
+        return {"run_id": row["run_id"], "paused": bool(row["paused"]), "checkpoint_paused_nodes": [str(node) for node in nodes]}
 
     def create_run(self, run_id: str, title: str, request: str, complexity: dict[str, Any]) -> None:
         self._execute("INSERT INTO runs(id,title,request,status,complexity_json) VALUES(?,?,?,?,?)", (run_id, title, request, "created", json.dumps(complexity, ensure_ascii=False)))
@@ -109,8 +149,8 @@ class CollabStore:
 
     def insert_wbs_node(self, run_id: str, node: dict[str, Any]) -> None:
         self._execute(
-            """INSERT OR REPLACE INTO wbs_nodes(id,run_id,parent_id,title,description,capability,complexity,dependencies_json,parallelizable,deliverable,status,attempt,checkpoint,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-            (node["id"], run_id, node.get("parent_id"), node["title"], node["description"], node["capability"], node["complexity"], json.dumps(node.get("dependencies", []), ensure_ascii=False), 1 if node.get("parallelizable", True) else 0, node["deliverable"], node.get("status", "pending"), node.get("attempt", 1), 1 if node.get("checkpoint", False) else 0),
+            """INSERT OR REPLACE INTO wbs_nodes(id,run_id,parent_id,title,description,capability,complexity,dependencies_json,parallelizable,deliverable,brief,shared_brief,estimated_duration,result_struct_json,status,attempt,checkpoint,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            (node["id"], run_id, node.get("parent_id"), node["title"], node["description"], node["capability"], node["complexity"], json.dumps(node.get("dependencies", []), ensure_ascii=False), 1 if node.get("parallelizable", True) else 0, node["deliverable"], node.get("brief", ""), node.get("shared_brief", ""), node.get("estimated_duration"), node.get("result_struct_json"), node.get("status", "pending"), node.get("attempt", 1), 1 if node.get("checkpoint", False) else 0),
         )
 
     def get_node(self, run_id: str, node_id: str) -> dict[str, Any] | None:
@@ -122,6 +162,30 @@ class CollabStore:
 
     def update_node_result(self, run_id: str, node_id: str, result: str) -> None:
         self._execute("UPDATE wbs_nodes SET result=?, updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND id=?", (result, run_id, node_id))
+
+    def save_node_result(self, run_id: str, node_id: str, result_text: str, result_struct: dict[str, Any] | None) -> None:
+        self._execute(
+            """INSERT OR REPLACE INTO node_results(node_id,run_id,result_text,result_struct_json,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)""",
+            (node_id, run_id, result_text, json.dumps(result_struct, ensure_ascii=False) if result_struct is not None else None),
+        )
+
+    def load_node_results(self, run_id: str) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._query("SELECT * FROM node_results WHERE run_id=? ORDER BY node_id", (run_id,))]
+
+    def save_context_snapshot(self, run_id: str, snapshot_type: str, snapshot: dict[str, Any], node_id: str | None = None) -> None:
+        if snapshot_type not in {"node_completed", "checkpoint"}:
+            raise ValueError("snapshot_type must be 'node_completed' or 'checkpoint'")
+        self._execute(
+            """INSERT INTO context_snapshots(run_id,snapshot_type,node_id,snapshot_json) VALUES(?,?,?,?)""",
+            (run_id, snapshot_type, node_id, json.dumps(snapshot, ensure_ascii=False)),
+        )
+
+    def load_context_snapshots(self, run_id: str, snapshot_type: str | None = None) -> list[dict[str, Any]]:
+        if snapshot_type is None:
+            rows = self._query("SELECT * FROM context_snapshots WHERE run_id=? ORDER BY id", (run_id,))
+        else:
+            rows = self._query("SELECT * FROM context_snapshots WHERE run_id=? AND snapshot_type=? ORDER BY id", (run_id, snapshot_type))
+        return [dict(r) for r in rows]
 
     def update_node_attempt(self, run_id: str, node_id: str, attempt: int) -> None:
         self._execute("UPDATE wbs_nodes SET attempt=?, updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND id=?", (attempt, run_id, node_id))

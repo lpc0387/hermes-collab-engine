@@ -97,6 +97,16 @@ class InterventionCliV3Tests(unittest.TestCase):
         self.assertEqual(calls[0], ("init", str(Path(tmp) / "db.sqlite3"), tmp, "worker-model"))
         self.assertEqual(calls[1], ("run_1", "wbs-1", True, "worker-model", "retry", "narrow scope"))
 
+    def test_snapshot_cli_prints_persisted_run_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "db.sqlite3"
+            CollabStore(db_path).save_run_state("run_1", True, {"wbs-1"})
+
+            proc = run_cli("snapshot", "--db", str(db_path), "--run-id", "run_1", "--json")
+
+            self.assertEqual(proc.returncode, 0, msg=f"stdout={proc.stdout!r} stderr={proc.stderr!r}")
+            self.assertEqual(json.loads(proc.stdout)["snapshot"], {"run_id": "run_1", "paused": True, "checkpoint_paused_nodes": ["wbs-1"]})
+
     def test_risk_policy_set_and_show_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "db.sqlite3"

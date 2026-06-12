@@ -45,6 +45,8 @@ class RiskDetectionTests(unittest.TestCase):
 
             self.assertEqual(risks[0][0], "medium")
             self.assertIn("wbs-1", engine._checkpoint_paused_nodes)
+            state = engine.store.load_run_state("run_1")
+            self.assertEqual(state["checkpoint_paused_nodes"], ["wbs-1"])
             timer.assert_called_once()
             timer.return_value.start.assert_called_once()
 

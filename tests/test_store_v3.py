@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -54,6 +55,87 @@ class StoreV3Tests(unittest.TestCase):
             row = store.get_node("run_1", "wbs-1")
             self.assertEqual(row["attempt"], 3)
             self.assertEqual(row["result"], "new result")
+
+    def test_save_and_load_node_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollabStore(Path(tmp) / "db.sqlite3")
+
+            store.save_node_result("run_1", "wbs-1", "text", {"summary": "structured"})
+            store.save_node_result("run_1", "wbs-2", "plain", None)
+
+            rows = store.load_node_results("run_1")
+            by_id = {row["node_id"]: row for row in rows}
+            self.assertEqual(by_id["wbs-1"]["result_text"], "text")
+            self.assertEqual(by_id["wbs-1"]["result_struct_json"], '{"summary": "structured"}')
+            self.assertEqual(by_id["wbs-2"]["result_text"], "plain")
+            self.assertIsNone(by_id["wbs-2"]["result_struct_json"])
+
+    def test_existing_db_creates_node_results_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "legacy.sqlite3"
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE runs (id TEXT PRIMARY KEY,title TEXT NOT NULL,request TEXT NOT NULL,status TEXT NOT NULL,complexity_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,completed_at TEXT)")
+            conn.commit()
+            conn.close()
+
+            store = CollabStore(db_path)
+            tables = {row[0] for row in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+
+            self.assertIn("node_results", tables)
+
+    def test_save_and_load_context_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollabStore(Path(tmp) / "db.sqlite3")
+            snapshot = {
+                "plan_summary": "plan",
+                "nodes": {"wbs-1": {"status": "completed", "quality": "ok", "key_facts": ["fact"]}},
+                "decisions": [],
+                "risk_assessments": [],
+                "user_instructions": [],
+                "pending_actions": [],
+            }
+
+            store.save_context_snapshot("run_1", "node_completed", snapshot, "wbs-1")
+            store.save_context_snapshot("run_1", "checkpoint", snapshot, "wbs-1")
+
+            all_rows = store.load_context_snapshots("run_1")
+            checkpoint_rows = store.load_context_snapshots("run_1", "checkpoint")
+            self.assertEqual([row["snapshot_type"] for row in all_rows], ["node_completed", "checkpoint"])
+            self.assertEqual(len(checkpoint_rows), 1)
+            self.assertEqual(checkpoint_rows[0]["node_id"], "wbs-1")
+            self.assertEqual(json.loads(checkpoint_rows[0]["snapshot_json"]), snapshot)
+
+    def test_save_context_snapshot_rejects_unknown_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollabStore(Path(tmp) / "db.sqlite3")
+
+            with self.assertRaises(ValueError):
+                store.save_context_snapshot("run_1", "pre_compaction", {}, None)
+
+    def test_save_and_load_run_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollabStore(Path(tmp) / "db.sqlite3")
+
+            store.save_run_state("run_1", True, {"wbs-2", "wbs-1"})
+            state = store.load_run_state("run_1")
+            all_states = store.load_run_state()
+
+            self.assertEqual(state, {"run_id": "run_1", "paused": True, "checkpoint_paused_nodes": ["wbs-1", "wbs-2"]})
+            self.assertEqual(all_states, [state])
+
+    def test_existing_db_creates_run_state_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "legacy.sqlite3"
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE runs (id TEXT PRIMARY KEY,title TEXT NOT NULL,request TEXT NOT NULL,status TEXT NOT NULL,complexity_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,completed_at TEXT)")
+            conn.commit()
+            conn.close()
+
+            store = CollabStore(db_path)
+            tables = {row[0] for row in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+
+            self.assertIn("run_state", tables)
+            self.assertIn("context_snapshots", tables)
 
     def test_existing_wbs_table_migrates_checkpoint_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

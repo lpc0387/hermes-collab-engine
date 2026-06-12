@@ -164,6 +164,17 @@ def main() -> int:
     resume_run.add_argument("--reason", default="resumed by parent/operator intervention")
     resume_run.add_argument("--json", action="store_true")
 
+    snapshot = sub.add_parser("snapshot", help="Show persisted run pause/checkpoint state")
+    snapshot.add_argument("--db", default="data/collab.sqlite3")
+    snapshot.add_argument("--run-id")
+    snapshot.add_argument("--json", action="store_true")
+
+    context_snapshot = sub.add_parser("context-snapshot", help="Show persisted context snapshots for a run")
+    context_snapshot.add_argument("--db", default="data/collab.sqlite3")
+    context_snapshot.add_argument("run_id", nargs="?")
+    context_snapshot.add_argument("--latest", action="store_true")
+    context_snapshot.add_argument("--type", choices=("pre_compaction", "node_completed", "checkpoint"), dest="snapshot_type")
+
     redo_node = sub.add_parser("redo-node", help="Create a redo node while keeping the source node for audit")
     redo_node.add_argument("--db", default="data/collab.sqlite3")
     redo_node.add_argument("--cwd", default=".")
@@ -272,6 +283,29 @@ def main() -> int:
         result = {"ok": True, "run_id": args.run_id, "node_id": args.node_id, "level": args.level, "message": args.message}
         print(json.dumps(result, ensure_ascii=False, indent=2 if args.json else None))
         return 0
+
+    if args.cmd == "snapshot":
+        from .store import CollabStore
+        store = CollabStore(args.db)
+        result = store.load_run_state(args.run_id)
+        _json_print({"ok": True, "snapshot": result}, pretty=True)
+        return 0
+
+    if args.cmd == "context-snapshot":
+        from .store import CollabStore
+        if not args.run_id:
+            print("error: missing run_id")
+            return 1
+        try:
+            store = CollabStore(args.db)
+            result = store.load_context_snapshots(args.run_id, snapshot_type=args.snapshot_type)
+            if args.latest:
+                result = result[-1:] if result else []
+            _json_print(result, pretty=True)
+            return 0
+        except Exception as exc:
+            print(f"error: {exc}")
+            return 1
 
     if args.cmd in {"pause-run", "resume-run", "redo-node"}:
         engine = CollabEngine(args.db, args.cwd, worker_model=getattr(args, "worker_model", None))

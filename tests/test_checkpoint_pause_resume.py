@@ -47,6 +47,8 @@ class CheckpointPauseResumeTests(unittest.TestCase):
             engine._apply_risk_policy("run_1", risks, RiskPolicy(high="pause"))
 
             self.assertIn("wbs-1", engine._checkpoint_paused_nodes)
+            state = engine.store.load_run_state("run_1")
+            self.assertEqual(state["checkpoint_paused_nodes"], ["wbs-1"])
             logs = engine.store._query("SELECT level, node_id FROM logs WHERE level='checkpoint'")
             self.assertEqual(logs[0]["node_id"], "wbs-1")
 
@@ -61,6 +63,8 @@ class CheckpointPauseResumeTests(unittest.TestCase):
             timer.join(timeout=1)
 
             self.assertNotIn("wbs-1", engine._checkpoint_paused_nodes)
+            state = engine.store.load_run_state("run_1")
+            self.assertEqual(state["checkpoint_paused_nodes"], [])
             lesson = engine.store._one("SELECT scope, category FROM lessons WHERE category='checkpoint-timeout'")
             self.assertEqual(lesson["scope"], "engine")
 
@@ -81,6 +85,30 @@ class CheckpointPauseResumeTests(unittest.TestCase):
             self.assertNotIn("run_1", paused_engine._paused_runs)
             self.assertEqual(paused_engine._checkpoint_paused_nodes, set())
             self.assertEqual(json.loads(output.getvalue()).get("action"), "resumed")
+
+    def test_pause_and_resume_persist_run_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = make_engine(tmp)
+
+            engine.pause_run("run_1")
+            paused = engine.store.load_run_state("run_1")
+            engine.resume_run("run_1")
+            resumed = engine.store.load_run_state("run_1")
+
+            self.assertTrue(paused["paused"])
+            self.assertFalse(resumed["paused"])
+            self.assertEqual(resumed["checkpoint_paused_nodes"], [])
+
+    def test_engine_restores_paused_state_on_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "db.sqlite3"
+            first = CollabEngine(db_path, tmp)
+            first.store.save_run_state("run_1", True, {"wbs-1"})
+
+            restored = CollabEngine(db_path, tmp)
+
+            self.assertIn("run_1", restored._paused_runs)
+            self.assertEqual(restored._checkpoint_paused_nodes, {"wbs-1"})
 
     def test_paused_run_blocks_scheduling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,9 +144,17 @@ class CheckpointPauseResumeTests(unittest.TestCase):
 
             engine._run_worker = fake_run_worker
 
-            engine.run("checkpoint downstream", concurrency=1, aggregate=False)
+            result = engine.run("checkpoint downstream", concurrency=1, aggregate=False)
 
+            snapshots = engine.store.load_context_snapshots(result["run_id"])
             self.assertEqual(calls, ["wbs-1"])
+            self.assertEqual([row["snapshot_type"] for row in snapshots], ["node_completed", "checkpoint"])
+            checkpoint_snapshot = json.loads(snapshots[1]["snapshot_json"])
+            self.assertEqual(checkpoint_snapshot["plan_summary"], "")
+            self.assertEqual(checkpoint_snapshot["nodes"]["wbs-1"]["status"], "completed")
+            self.assertEqual(checkpoint_snapshot["nodes"]["wbs-1"]["key_facts"], "ok wbs-1")
+            self.assertEqual(checkpoint_snapshot["pending_actions"], ["wbs-1"])
+            self.assertEqual(checkpoint_snapshot["risk_assessments"][0]["risk_level"], "high")
 
 
 if __name__ == "__main__":
