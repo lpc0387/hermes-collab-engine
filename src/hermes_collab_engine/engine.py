@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .models import Plan, WBSNode, WorkerResult
+from .models import Plan, RiskPolicy, CheckpointDecision, WBSNode, WorkerResult
 from .planner import Planner
 from .store import CollabStore
 
@@ -39,6 +39,9 @@ class CollabEngine:
         self._node_results_struct: dict[str, dict[str, Any]] = {}
         self._node_results_lock = threading.Lock()
         self._current_plan: Plan | None = None
+        self._checkpoint_paused_nodes: set[str] = set()
+        self._paused_runs: set[str] = set()
+        self._file_allowlist: set[str] = set()
 
     def run(self, request: str, *, title: str | None = None, concurrency: int = 4, timeout: int = 900, max_retries: int = 2, split_count: int = 4, aggregate: bool = True) -> dict:
         run_id = "run_" + uuid.uuid4().hex[:12]
@@ -81,11 +84,17 @@ class CollabEngine:
                 running: dict[concurrent.futures.Future[list[WorkerResult]], WBSNode] = {}
                 while pending or running:
                     while pending and len(running) < max_workers:
+                        if run_id in self._paused_runs:
+                            break  # Don't schedule new nodes while paused
                         ready = [n for n in pending.values() if all(dep in completed for dep in n.dependencies)]
+                        # Also skip nodes whose dependencies are checkpoint-paused
+                        ready = [n for n in ready if not any(dep in self._checkpoint_paused_nodes for dep in n.dependencies)]
                         if not ready:
                             if running:
                                 break
-                            # Break dependency deadlocks by running the first pending node and logging it.
+                            # Break dependency deadlocks, but not if we're checkpoint-paused
+                            if self._checkpoint_paused_nodes:
+                                break
                             ready = [next(iter(pending.values()))]
                             self.store.log(run_id, "warning", "dependency deadlock avoided", {"node": ready[0].id})
 
@@ -120,6 +129,9 @@ class CollabEngine:
                         running[future] = node
 
                     if not running:
+                        if self._checkpoint_paused_nodes:
+                            # Checkpoint paused, no workers running — stop scheduling
+                            break
                         continue
 
                     done, _ = concurrent.futures.wait(running.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
@@ -154,6 +166,17 @@ class CollabEngine:
                         if any(r.ok for r in node_results):
                             # Mark the original node as covered if parent or any shard succeeded.
                             completed.add(node.id)
+                            # --- v3: checkpoint & risk detection ---
+                            risk_policy = self.store.load_risk_policy()
+                            result_struct = None
+                            with self._node_results_lock:
+                                result_struct = self._node_results_struct.get(node.id)
+                            risks = self._detect_risks(node, result_struct, risk_policy)
+                            self._apply_risk_policy(run_id, risks, risk_policy)
+                            # If this node is checkpoint-paused, remove from completed
+                            # so downstream dependencies are not considered satisfied
+                            if node.id in self._checkpoint_paused_nodes:
+                                completed.discard(node.id)
                         else:
                             failed_final.extend(node_results)
 
@@ -180,6 +203,8 @@ class CollabEngine:
                 self._current_plan = None
                 self._node_results = {}
                 self._node_results_struct = {}
+            self._checkpoint_paused_nodes.clear()
+            self._paused_runs.discard(run_id)
 
     def _effective_timeout(self, node: WBSNode, timeout: int) -> int:
         if node.estimated_duration:
@@ -462,3 +487,159 @@ Output contract:
         slow = [r for r in results if r.duration_seconds > 120 and r.ok]
         if slow:
             self.store.add_lesson("planning", f"Run {run_id}: {len(slow)} slow successful worker(s); consider smaller WBS nodes for similar tasks.", {"run_id": run_id})
+
+    # ------------------------------------------------------------------
+    # v3: Checkpoint, risk detection, pause/resume, redo-node
+    # ------------------------------------------------------------------
+
+    def pause_run(self, run_id: str, *, reason: str | None = None) -> dict:
+        """Stop dispatching new nodes. Running workers continue to completion."""
+        self._paused_runs.add(run_id)
+        self.store.log(run_id, "pause", f"Run paused by parent{': '+reason if reason else ''}")
+        return {"ok": True, "run_id": run_id, "action": "paused"}
+
+    def resume_run(self, run_id: str, *, reason: str | None = None) -> dict:
+        """Resume dispatching nodes after a pause."""
+        self._paused_runs.discard(run_id)
+        self._checkpoint_paused_nodes.clear()
+        self.store.log(run_id, "resume", f"Run resumed by parent{': '+reason if reason else ''}")
+        return {"ok": True, "run_id": run_id, "action": "resumed"}
+
+    def _detect_risks(self, node: WBSNode, result_struct: dict[str, Any] | None, risk_policy: RiskPolicy) -> list[tuple[str, str]]:
+        """Detect risk events from a completed node. Returns [(risk_level, description)]."""
+        risks: list[tuple[str, str]] = []
+        if result_struct:
+            blocking = result_struct.get("blocking_issues") or result_struct.get("notes")
+            if blocking and isinstance(blocking, list) and len(blocking) > 0:
+                risks.append(("medium", f"Node {node.id} reports blocking issues: {blocking}"))
+            files = result_struct.get("files_modified") or result_struct.get("files_touched") or []
+            if self._file_allowlist and files:
+                for f in files:
+                    fpath = f.get("path", f) if isinstance(f, dict) else f
+                    if fpath not in self._file_allowlist:
+                        risks.append(("medium", f"Node {node.id} touched non-allowlist file: {fpath}"))
+        if node.checkpoint:
+            risks.append(("high", f"Checkpoint node {node.id} ({node.title}) completed"))
+        return risks
+
+    def _apply_risk_policy(self, run_id: str, risks: list[tuple[str, str]], risk_policy: RiskPolicy) -> None:
+        """Apply the configured risk policy to detected risks."""
+        for risk_level, desc in risks:
+            action = getattr(risk_policy, risk_level, "auto")
+            self.store.log(run_id, "risk", f"[{risk_level}] {desc} (action={action})")
+            if action in ("notify", "pause"):
+                # Find which node this risk is about (extract from desc)
+                node_id = ""
+                for n in self._current_plan.nodes if self._current_plan else []:
+                    if n.id in desc:
+                        node_id = n.id
+                        break
+                if node_id:
+                    self._checkpoint_paused_nodes.add(node_id)
+                    self.store.log(run_id, "checkpoint", f"Paused at {node_id}: {desc}", node_id=node_id)
+                if action == "notify":
+                    # Auto-resume after timeout
+                    threading.Timer(
+                        risk_policy.checkpoint_timeout,
+                        self._auto_resume_checkpoint,
+                        args=(run_id, node_id),
+                    ).start()
+                # action == "pause" requires explicit resume
+
+    def _auto_resume_checkpoint(self, run_id: str, node_id: str) -> None:
+        """Auto-resume a checkpoint after timeout if still paused."""
+        if node_id in self._checkpoint_paused_nodes:
+            self._checkpoint_paused_nodes.discard(node_id)
+            self.store.log(run_id, "checkpoint", f"Auto-resumed {node_id} after timeout", node_id=node_id)
+            risk_policy = self.store.load_risk_policy()
+            self.store.add_lesson(
+                "checkpoint-timeout",
+                f"Checkpoint at {node_id} auto-resumed after {risk_policy.checkpoint_timeout}s",
+                scope="engine",
+            )
+
+    def redo_node(self, run_id: str, node_id: str, *, cascade: bool = False, worker_model: str | None = None, reason: str | None = None, description_delta: str | None = None) -> dict:
+        """Re-execute a single node from a completed (or paused) run.
+
+        If cascade=True, also redo all downstream nodes that depend on this node.
+        """
+        plan = self._load_plan_from_db(run_id)
+        node = next((n for n in plan.nodes if n.id == node_id), None)
+        if not node:
+            raise ValueError(f"Node {node_id} not found in run {run_id}")
+
+        # Load upstream context
+        with self._node_results_lock:
+            old_results = dict(self._node_results)
+            old_structs = dict(self._node_results_struct)
+        upstream_ctx = self._build_upstream_context(node)
+
+        # Increment attempt
+        node.attempt += 1
+        self.store.update_node_attempt(run_id, node_id, node.attempt)
+
+        # Re-run the worker with same prompt
+        result = self._run_worker(run_id, node, 900, model_override=worker_model)
+        self._record_node_result(result)
+        self.store.update_node_result(run_id, node_id, result.result or "")
+
+        # If cascade, find and redo all downstream nodes
+        if cascade:
+            downstream = self._find_downstream_nodes(run_id, node_id)
+            for ds_node_id in downstream:
+                ds_node = next((n for n in plan.nodes if n.id == ds_node_id), None)
+                if ds_node:
+                    ds_node.attempt += 1
+                    self.store.update_node_attempt(run_id, ds_node_id, ds_node.attempt)
+                    ds_result = self._run_worker(run_id, ds_node, 900, model_override=worker_model)
+                    self._record_node_result(ds_result)
+                    self.store.update_node_result(run_id, ds_node_id, ds_result.result or "")
+
+        # Write lesson
+        self.store.add_lesson(
+            "redo-node",
+            f"Redid {node_id} (attempt {node.attempt}), cascade={cascade}",
+            scope="parent",
+            evidence={"node_id": node_id, "attempt": node.attempt, "cascade": cascade},
+        )
+        return {"node_id": node_id, "attempt": node.attempt, "status": "completed" if result.ok else "failed"}
+
+    def _find_downstream_nodes(self, run_id: str, node_id: str) -> list[str]:
+        """BFS to find all nodes that directly or indirectly depend on node_id."""
+        plan = self._load_plan_from_db(run_id)
+        downstream: set[str] = set()
+        queue = [node_id]
+        while queue:
+            current = queue.pop(0)
+            for node in plan.nodes:
+                if current in node.dependencies and node.id not in downstream:
+                    downstream.add(node.id)
+                    queue.append(node.id)
+        return list(downstream)
+
+    def _load_plan_from_db(self, run_id: str) -> Plan:
+        """Reconstruct a Plan object from stored WBS nodes."""
+        nodes_data = self.store.get_nodes(run_id)
+        wbs_nodes: list[WBSNode] = []
+        shared_brief = ""
+        for n in nodes_data:
+            deps = json.loads(n.get("dependencies_json", "[]"))
+            wbs_node = WBSNode(
+                id=n.get("id", ""),
+                title=n.get("title", ""),
+                brief=str(n.get("brief") or ""),
+                description=n.get("description", ""),
+                capability=n.get("capability", "implementation"),
+                complexity=n.get("complexity", 5),
+                dependencies=deps,
+                parallelizable=bool(n.get("parallelizable", 1)),
+                deliverable=n.get("deliverable", ""),
+                parent_id=n.get("parent_id"),
+                attempt=n.get("attempt", 1),
+                checkpoint=bool(n.get("checkpoint", 0)),
+                estimated_duration=n.get("estimated_duration"),
+            )
+            wbs_nodes.append(wbs_node)
+            if n.get("shared_brief"):
+                shared_brief = n["shared_brief"]
+        return Plan(nodes=wbs_nodes, shared_brief=shared_brief)

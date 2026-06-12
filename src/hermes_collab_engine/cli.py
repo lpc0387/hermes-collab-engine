@@ -6,12 +6,14 @@ import os
 import signal
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from .engine import CollabEngine
-from .models import WBSNode
+from .models import RiskPolicy, WBSNode
 from .server import DashboardServer
 
 LESSON_SCOPES = ("global", "project", "run", "node", "wbs-family")
+RISK_POLICY_ACTIONS = {"auto", "notify", "pause"}
 
 
 def _model_options(args):
@@ -29,6 +31,23 @@ def _json_arg(value: str, flag: str) -> dict:
     if not isinstance(data, dict):
         raise ValueError(f"invalid {flag}: expected object, got {type(data).__name__}")
     return data
+
+
+def _setting_value(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _json_print(data: dict | list, pretty: bool = True) -> None:
+    print(json.dumps(data, ensure_ascii=False, indent=2 if pretty else None))
+
+
+def _policy_action(value: str) -> str:
+    if value not in RISK_POLICY_ACTIONS:
+        raise argparse.ArgumentTypeError(f"must be one of {sorted(RISK_POLICY_ACTIONS)}")
+    return value
 
 
 def _node_from_row(row) -> WBSNode:
@@ -131,6 +150,54 @@ def main() -> int:
     skip_node.add_argument("--reason", required=True)
     skip_node.add_argument("--json", action="store_true")
 
+    pause_run = sub.add_parser("pause-run", help="Pause new worker dispatch for a run")
+    pause_run.add_argument("--db", default="data/collab.sqlite3")
+    pause_run.add_argument("--cwd", default=".")
+    pause_run.add_argument("--run-id", required=True)
+    pause_run.add_argument("--reason", default="paused by parent/operator intervention")
+    pause_run.add_argument("--json", action="store_true")
+
+    resume_run = sub.add_parser("resume-run", help="Resume new worker dispatch for a paused run")
+    resume_run.add_argument("--db", default="data/collab.sqlite3")
+    resume_run.add_argument("--cwd", default=".")
+    resume_run.add_argument("--run-id", required=True)
+    resume_run.add_argument("--reason", default="resumed by parent/operator intervention")
+    resume_run.add_argument("--json", action="store_true")
+
+    redo_node = sub.add_parser("redo-node", help="Create a redo node while keeping the source node for audit")
+    redo_node.add_argument("--db", default="data/collab.sqlite3")
+    redo_node.add_argument("--cwd", default=".")
+    redo_node.add_argument("--run-id")
+    redo_node.add_argument("--node-id", required=True)
+    redo_node.add_argument("--reason", default="manual")
+    redo_node.add_argument("--description-delta", default="Redo requested by parent/operator intervention")
+    redo_node.add_argument("--cascade", action="store_true")
+    redo_node.add_argument("--worker-model")
+    redo_node.add_argument("--json", action="store_true")
+
+    setting = sub.add_parser("setting", help="Manage persistent engine settings")
+    setting_sub = setting.add_subparsers(dest="setting_cmd", required=True)
+    setting_get = setting_sub.add_parser("get", help="Get a setting value")
+    setting_get.add_argument("--db", default="data/collab.sqlite3")
+    setting_get.add_argument("key")
+    setting_set = setting_sub.add_parser("set", help="Set a setting value")
+    setting_set.add_argument("--db", default="data/collab.sqlite3")
+    setting_set.add_argument("key")
+    setting_set.add_argument("value")
+    setting_list = setting_sub.add_parser("list", help="List all settings")
+    setting_list.add_argument("--db", default="data/collab.sqlite3")
+
+    risk_policy = sub.add_parser("risk-policy", help="Show or update risk policy")
+    risk_policy_sub = risk_policy.add_subparsers(dest="risk_policy_cmd", required=True)
+    risk_policy_show = risk_policy_sub.add_parser("show", help="Show current risk policy")
+    risk_policy_show.add_argument("--db", default="data/collab.sqlite3")
+    risk_policy_set = risk_policy_sub.add_parser("set", help="Update risk policy fields")
+    risk_policy_set.add_argument("--db", default="data/collab.sqlite3")
+    risk_policy_set.add_argument("--low", type=_policy_action)
+    risk_policy_set.add_argument("--medium", type=_policy_action)
+    risk_policy_set.add_argument("--high", type=_policy_action)
+    risk_policy_set.add_argument("--checkpoint-timeout", type=int)
+
     args = parser.parse_args()
     if args.cmd == "run":
         request = Path(args.request_file).read_text(encoding="utf-8") if args.request_file else " ".join(args.request)
@@ -205,6 +272,69 @@ def main() -> int:
         result = {"ok": True, "run_id": args.run_id, "node_id": args.node_id, "level": args.level, "message": args.message}
         print(json.dumps(result, ensure_ascii=False, indent=2 if args.json else None))
         return 0
+
+    if args.cmd in {"pause-run", "resume-run", "redo-node"}:
+        engine = CollabEngine(args.db, args.cwd, worker_model=getattr(args, "worker_model", None))
+        try:
+            if args.cmd == "pause-run":
+                result = engine.pause_run(args.run_id, reason=args.reason)
+            elif args.cmd == "resume-run":
+                result = engine.resume_run(args.run_id, reason=args.reason)
+            else:
+                result = engine.redo_node(
+                    run_id=args.run_id,
+                    node_id=args.node_id,
+                    reason=args.reason,
+                    description_delta=args.description_delta,
+                    cascade=args.cascade,
+                    worker_model=args.worker_model,
+                )
+        except AttributeError as exc:
+            result = {"ok": False, "error": str(exc), "command": args.cmd}
+        except TypeError:
+            if args.cmd == "pause-run":
+                result = engine.pause_run(args.run_id)
+            elif args.cmd == "resume-run":
+                result = engine.resume_run(args.run_id)
+            else:
+                result = engine.redo_node(args.run_id, args.node_id, cascade=args.cascade, worker_model=args.worker_model)
+        _json_print(result, pretty=True)
+        return 0 if result.get("ok", True) else 1
+
+    if args.cmd == "setting":
+        from .store import CollabStore
+        store = CollabStore(args.db)
+        if args.setting_cmd == "get":
+            value = store.get_setting(args.key)
+            _json_print({"ok": True, "key": args.key, "value": value}, pretty=True)
+            return 0
+        if args.setting_cmd == "set":
+            value = _setting_value(args.value)
+            store.set_setting(args.key, value)
+            _json_print({"ok": True, "key": args.key, "value": value}, pretty=True)
+            return 0
+        if args.setting_cmd == "list":
+            _json_print({"ok": True, "settings": store.list_settings()}, pretty=True)
+            return 0
+
+    if args.cmd == "risk-policy":
+        from .store import CollabStore
+        store = CollabStore(args.db)
+        if args.risk_policy_cmd == "show":
+            _json_print({"ok": True, "risk_policy": store.load_risk_policy().to_dict()}, pretty=True)
+            return 0
+        if args.risk_policy_cmd == "set":
+            existing = store.load_risk_policy().to_dict()
+            updates = {key: value for key, value in {"low": args.low, "medium": args.medium, "high": args.high}.items() if value is not None}
+            if args.checkpoint_timeout is not None:
+                if args.checkpoint_timeout < 1:
+                    _json_print({"ok": False, "error": "--checkpoint-timeout must be >= 1"}, pretty=True)
+                    return 2
+                updates["checkpoint_timeout"] = args.checkpoint_timeout
+            policy = RiskPolicy.from_dict({**existing, **updates})
+            store.set_setting("risk_policy", policy.to_dict())
+            _json_print({"ok": True, "risk_policy": policy.to_dict()}, pretty=True)
+            return 0
 
     if args.cmd in {"kill-node", "split-node", "skip-node"}:
         from .store import CollabStore

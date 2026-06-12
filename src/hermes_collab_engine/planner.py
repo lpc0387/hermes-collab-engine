@@ -112,6 +112,38 @@ No prose, no code fences outside the JSON, just the array.
             return ""
         return "Recent planning lessons to apply:\n" + "\n".join(lines) + "\n\n"
 
+    def _checkpoint_lesson_texts(self, store=None, limit: int = 20) -> list[str]:
+        if store is None:
+            return []
+        try:
+            lessons = store.lessons(limit=limit, scope="engine")
+        except Exception:
+            return []
+        texts = []
+        for lesson in lessons:
+            text = str(lesson.get("lesson") or "").strip().lower()
+            if text:
+                texts.append(text)
+        return texts
+
+    def _assign_checkpoints(self, nodes: list[WBSNode], store=None) -> list[WBSNode]:
+        children_map: dict[str, list[WBSNode]] = {node.id: [] for node in nodes}
+        for node in nodes:
+            for dependency in node.dependencies:
+                children_map.setdefault(dependency, []).append(node)
+
+        lesson_texts = self._checkpoint_lesson_texts(store)
+        for node in nodes:
+            if node.complexity >= 7:
+                node.checkpoint = True
+            children = children_map.get(node.id, [])
+            if node.capability == "implementation" and any(child.capability == "implementation" for child in children):
+                node.checkpoint = True
+            title_words = [word for word in re.findall(r"\w+", node.title.lower()) if len(word) > 3]
+            if title_words and any(any(word in text for word in title_words) for text in lesson_texts):
+                node.checkpoint = True
+        return nodes
+
     def decompose(self, request: str, max_nodes: int = 8) -> Plan:
         lessons_block = self._load_recent_lessons()
         prompt = f"""You are designing a WBS for a software collaboration engine implementation.
@@ -166,7 +198,7 @@ No prose, no code fences outside the JSON, just the object.
                 ))
             if nodes:
                 shared_brief = str(data.get("shared_brief") or "") if isinstance(data, dict) else ""
-                return Plan(nodes=nodes, shared_brief=shared_brief)
+                return Plan(nodes=self._assign_checkpoints(nodes, self.store), shared_brief=shared_brief)
         except Exception:
             pass
         return self.fallback_wbs(request)
@@ -246,6 +278,17 @@ No prose, no code fences outside the JSON, just the object.
             brief="Verify the completed work with targeted checks and document outcomes, including any skipped validation.",
             estimated_duration=600,
         ))
+        children_map: dict[str, list[WBSNode]] = {node.id: [] for node in nodes}
+        for node in nodes:
+            for dependency in node.dependencies:
+                children_map.setdefault(dependency, []).append(node)
+        for node in nodes:
+            if node.complexity >= 5:
+                node.checkpoint = True
+            children = children_map.get(node.id, [])
+            if node.capability == "implementation" and any(child.capability == "implementation" for child in children):
+                node.checkpoint = True
+
         shared_brief = (
             "Fallback plan generated without leader model output. Keep scope tight, pass useful findings through dependencies, "
             "and report verification honestly."
