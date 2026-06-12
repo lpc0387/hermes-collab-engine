@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -13,6 +14,9 @@ from .store import CollabStore
 
 
 class CollabEngine:
+    _UPSTREAM_PER_CAP = 800
+    _UPSTREAM_TOTAL_CAP = 3000
+
     def __init__(
         self,
         db_path: str | Path = "data/collab.sqlite3",
@@ -26,6 +30,8 @@ class CollabEngine:
         self.worker_model = worker_model or model
         self.store = CollabStore(db_path)
         self.planner = Planner(self.cwd, model=self.leader_model)
+        self._node_results: dict[str, str] = {}
+        self._node_results_lock = threading.Lock()
 
     def run(self, request: str, *, title: str | None = None, concurrency: int = 4, timeout: int = 900, max_retries: int = 2, split_count: int = 4, aggregate: bool = True) -> dict:
         run_id = "run_" + uuid.uuid4().hex[:12]
@@ -93,6 +99,9 @@ class CollabEngine:
         self.store.update_node(node.id, "running")
         parent = self._run_worker(run_id, node, timeout)
         self.store.update_node(node.id, "completed" if parent.ok else "failed", parent.result, parent.session_id, parent.duration_seconds, None if parent.ok else parent.result)
+        if parent.ok:
+            with self._node_results_lock:
+                self._node_results[node.id] = parent.result or ''
         results = [parent]
         if parent.ok:
             return results
@@ -135,18 +144,45 @@ class CollabEngine:
             shards.append(shard)
         return shards
 
+    def _build_upstream_context(self, node) -> str:
+        if not node.dependencies:
+            return ''
+        with self._node_results_lock:
+            snapshot = {dep: self._node_results.get(dep) for dep in node.dependencies}
+        kept: list[str] = []
+        remaining = self._UPSTREAM_TOTAL_CAP
+        for dep_id in node.dependencies:
+            text = snapshot.get(dep_id)
+            if not text:
+                continue
+            snippet = text
+            if len(snippet) > self._UPSTREAM_PER_CAP:
+                snippet = '[truncated]\n' + snippet[-(self._UPSTREAM_PER_CAP - len('[truncated]\n')):]
+            if remaining < len(snippet):
+                if remaining <= len('[truncated]\n'):
+                    break
+                snippet = '[truncated]\n' + snippet[-(remaining - len('[truncated]\n')):]
+            kept.append(f"--- from {dep_id} ---\n{snippet}")
+            remaining -= len(snippet)
+            if remaining <= 0:
+                break
+        if not kept:
+            return ''
+        return 'Upstream context (from completed dependency nodes):\n' + '\n\n'.join(kept) + '\n\n'
+
     def _run_worker(self, run_id: str, node: WBSNode, timeout: int, model_override: str | None = None) -> WorkerResult:
         worker_id = f"worker_{run_id}_{node.id}_{node.attempt}"
         self.store.worker_start(worker_id, run_id, node.id)
         self.store.log(run_id, "info", "worker started", {"node": node.id, "title": node.title}, node.id)
         started = time.time()
+        upstream_block = self._build_upstream_context(node)
         prompt = f"""You are a Claude Code worker in a Hermes collaboration engine.
 
 WBS node: {node.title}
 Capability: {node.capability}
 Deliverable: {node.deliverable}
 
-Task:
+{upstream_block}Task:
 {node.description}
 
 Work in cwd: {self.cwd}

@@ -41,6 +41,22 @@ def main() -> int:
     status.add_argument("--db", default="data/collab.sqlite3")
     status.add_argument("--json", action="store_true")
 
+    lesson = sub.add_parser("lesson", help="Manage lessons learned")
+    lesson_sub = lesson.add_subparsers(dest="lesson_cmd", required=True)
+
+    lesson_add = lesson_sub.add_parser("add", help="Add a lesson")
+    lesson_add.add_argument("--db", default="data/collab.sqlite3")
+    lesson_add.add_argument("--category", required=True)
+    lesson_add.add_argument("--lesson", required=True)
+    lesson_add.add_argument("--source", default="preflight")
+    lesson_add.add_argument("--evidence-json", default="{}")
+
+    lesson_list = lesson_sub.add_parser("list", help="List lessons")
+    lesson_list.add_argument("--db", default="data/collab.sqlite3")
+    lesson_list.add_argument("--limit", type=int, default=20)
+    lesson_list.add_argument("--category")
+    lesson_list.add_argument("--json", action="store_true")
+
     args = parser.parse_args()
     if args.cmd == "run":
         request = Path(args.request_file).read_text(encoding="utf-8") if args.request_file else " ".join(args.request)
@@ -75,6 +91,34 @@ def main() -> int:
         else:
             print(json.dumps(data, ensure_ascii=False, indent=2))
         return 0
+
+    if args.cmd == "lesson":
+        from .store import CollabStore
+        if args.lesson_cmd == "add":
+            try:
+                extra = json.loads(args.evidence_json)
+            except json.JSONDecodeError as exc:
+                print(f"invalid --evidence-json: {exc}")
+                return 2
+            if not isinstance(extra, dict):
+                print(f"invalid --evidence-json: expected object, got {type(extra).__name__}")
+                return 2
+            evidence = {"source": args.source, **extra}
+            store = CollabStore(args.db)
+            store.add_lesson(args.category, args.lesson, evidence)
+            print(json.dumps({"ok": True, "category": args.category, "source": args.source}, ensure_ascii=False, separators=(",", ":")))
+            return 0
+        if args.lesson_cmd == "list":
+            store = CollabStore(args.db)
+            rows = store.lessons(args.limit)
+            if args.category:
+                rows = [r for r in rows if r["category"] == args.category]
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=2))
+            else:
+                for r in rows:
+                    print(f"[{r['id']}] {r['category']}: {r['lesson']}  ({r['created_at']})")
+            return 0
 
     return 1
 
