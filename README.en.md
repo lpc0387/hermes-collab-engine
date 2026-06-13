@@ -14,14 +14,6 @@ It ships with a real-time **dashboard**, isolated **sandbox**, Leader feedback d
 
 If this project helps you, please star it on GitHub to follow the v5.0 release line. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before contributing, report security issues through [`SECURITY.md`](SECURITY.md), follow plans in [`ROADMAP.md`](ROADMAP.md), and review changes in [`CHANGELOG.md`](CHANGELOG.md). Optional community launch copy lives in [`docs/launch/v5.0-posts.md`](docs/launch/v5.0-posts.md).
 
-## Contact and support
-
-WeChat: `lg19961117`
-
-If the project helps you, optional sponsorship is welcome:
-
-![Sponsor QR code](docs/assets/money.png)
-
 ## One-line deployment
 
 ```bash
@@ -64,6 +56,8 @@ hermes-collab run "Analyze the current project structure" --cwd . --json
 ## Sandbox demo
 
 The sandbox demonstrates the dashboard, run history, Worker state, model display, and Leader diary. It uses mock APIs and sanitized demo data, and **does not call real workers, write production data, or include real runtime data** by default.
+
+To try an online sandbox environment, contact the author on WeChat `lg19961117` to request access.
 
 ```bash
 # One-shot launcher (default: 2 hours, auto-stops on timeout)
@@ -230,6 +224,17 @@ src/hermes_collab_engine/
 web/
 └── index.html       # Visualization dashboard
 ```
+
+## Contact and support
+
+Primary contact: WeChat `lg19961117`
+
+<details>
+<summary>Optional sponsorship for project maintenance</summary>
+
+<img src="docs/assets/money.png" alt="Sponsor QR code" width="260">
+
+</details>
 
 ## License
 

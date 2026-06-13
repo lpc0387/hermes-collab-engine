@@ -16,6 +16,8 @@ python3 sandbox/server.py --host 127.0.0.1 --port 8876
 
 Open <http://127.0.0.1:8876/>.
 
+To try an online sandbox environment, contact the author on WeChat `lg19961117` to request access.
+
 ## What is isolated
 
 | Area | Sandbox behavior |

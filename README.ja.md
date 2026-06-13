@@ -14,14 +14,6 @@ Hermes Collab Engine v5.0 は Hermes 協調ワークフロー向け **AI multi-a
 
 このプロジェクトが役立つ場合は、GitHub star で v5.0 リリースラインをフォローしてください。コントリビュート前に [`CONTRIBUTING.md`](CONTRIBUTING.md) を確認し、セキュリティ問題は [`SECURITY.md`](SECURITY.md) から報告し、計画は [`ROADMAP.md`](ROADMAP.md)、変更履歴は [`CHANGELOG.md`](CHANGELOG.md) を参照してください。コミュニティ共有文面は必要に応じて [`docs/launch/v5.0-posts.md`](docs/launch/v5.0-posts.md) を参照できます。
 
-## 連絡とサポート
-
-WeChat：`lg19961117`
-
-プロジェクトが役立つ場合は、任意の支援も歓迎します：
-
-![支援用QRコード](docs/assets/money.png)
-
 ## ワンラインデプロイ
 
 ```bash
@@ -64,6 +56,8 @@ hermes-collab run "現在のプロジェクト構造を分析" --cwd . --json
 ## sandbox デモ
 
 sandbox は dashboard、実行履歴、Worker 状態、モデル表示、Leader 日記をデモするための環境です。標準では mock API と匿名化済みデモデータを使い、**実 Worker を呼び出さず、本番データを書き込まず、実ランタイムデータを含みません**。
+
+オンライン sandbox 環境を体験したい場合は、WeChat `lg19961117` で作者に連絡してアクセスを依頼できます。
 
 ```bash
 # ワンコマンド起動（デフォルト 2 時間、タイムアウトで自動停止）
@@ -230,6 +224,17 @@ src/hermes_collab_engine/
 web/
 └── index.html       # 可視化 dashboard
 ```
+
+## 連絡とサポート
+
+主な連絡先：WeChat `lg19961117`
+
+<details>
+<summary>任意のスポンサー支援</summary>
+
+<img src="docs/assets/money.png" alt="支援用QRコード" width="260">
+
+</details>
 
 ## ライセンス
 
