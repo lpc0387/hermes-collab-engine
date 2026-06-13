@@ -448,6 +448,8 @@ def get_config_from_hermes():
             models = cfg['models']
         if cfg.get('default_leader') and not default_leader:
             default_leader = cfg['default_leader']
+        if cfg.get('default_worker') and not default_worker:
+            default_worker = cfg['default_worker']
         source_parts.append(cfg['source'])
 
     if not base_url or not token:

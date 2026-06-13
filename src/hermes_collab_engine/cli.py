@@ -18,8 +18,12 @@ RISK_POLICY_ACTIONS = {"auto", "notify", "pause"}
 
 def _model_options(args):
     model = args.model or os.environ.get("HERMES_COLLAB_MODEL") or os.environ.get("ANTHROPIC_MODEL")
-    leader_model = args.leader_model or os.environ.get("HERMES_COLLAB_LEADER_MODEL")
-    worker_model = args.worker_model or os.environ.get("HERMES_COLLAB_WORKER_MODEL")
+    if args.model:
+        leader_model = args.leader_model
+        worker_model = args.worker_model
+    else:
+        leader_model = args.leader_model or os.environ.get("HERMES_COLLAB_LEADER_MODEL")
+        worker_model = args.worker_model or os.environ.get("HERMES_COLLAB_WORKER_MODEL")
     return model, leader_model, worker_model
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import os
 import subprocess
 import threading
 import time
@@ -37,8 +38,9 @@ class CollabEngine:
         tool_registry: ToolRegistry | None = None,
     ):
         self.cwd = Path(cwd).resolve()
-        self.leader_model = leader_model or model
-        self.worker_model = worker_model or model
+        env_model = os.environ.get("HERMES_COLLAB_MODEL") or os.environ.get("ANTHROPIC_MODEL")
+        self.leader_model = leader_model or model or os.environ.get("HERMES_COLLAB_LEADER_MODEL") or env_model
+        self.worker_model = worker_model or model or os.environ.get("HERMES_COLLAB_WORKER_MODEL") or env_model
         self.agent_backend: AgentBackend = get_backend(agent)
         self.skill_registry = skill_registry or get_default_registry()
         self.tool_registry = tool_registry or get_default_tool_registry()
@@ -153,7 +155,7 @@ class CollabEngine:
                             split_children[node.id] = {shard.id for shard in shards}
                             split_finished[node.id] = set()
                             split_results[node.id] = []
-                            self.store.update_node(node.id, "running")
+                            self.store.update_node(node.id, "running", run_id=run_id)
                             self.store.log(
                                 run_id,
                                 "warning",
@@ -169,7 +171,7 @@ class CollabEngine:
                             )
                             for shard in shards:
                                 self.store.insert_wbs_node(run_id, shard.to_dict())
-                                self.store.update_node(shard.id, "pending")
+                                self.store.update_node(shard.id, "pending", run_id=run_id)
                                 pending[shard.id] = shard
                             continue
 
@@ -190,7 +192,7 @@ class CollabEngine:
                         except Exception as exc:
                             duration = 0.0
                             result = WorkerResult(node.id, node.title, False, f"Worker crashed: {type(exc).__name__}: {exc}", None, duration, 1, "", node.attempt)
-                            self.store.update_node(node.id, "failed", result.result, None, duration, result.result)
+                            self.store.update_node(node.id, "failed", result.result, None, duration, result.result, run_id=run_id)
                             self.store.log(run_id, "error", "worker future failed", result.to_dict(), node.id)
                             node_results = [result]
 
@@ -205,10 +207,10 @@ class CollabEngine:
                                 parent_results = split_results[parent_id]
                                 if any(r.ok for r in parent_results):
                                     completed.add(parent_id)
-                                    self.store.update_node(parent_id, "completed", "Completed by proactive shards", None, None, None)
+                                    self.store.update_node(parent_id, "completed", "Completed by proactive shards", None, None, None, run_id=run_id)
                                 else:
                                     failed_final.extend(parent_results)
-                                    self.store.update_node(parent_id, "failed", None, None, None, "All proactive shards failed")
+                                    self.store.update_node(parent_id, "failed", None, None, None, "All proactive shards failed", run_id=run_id)
                             continue
 
                         if any(r.ok for r in node_results):
@@ -231,6 +233,17 @@ class CollabEngine:
             final = None
             if aggregate:
                 final = self._aggregate(run_id, request, results, timeout)
+                self.store.update_node(
+                    final.node_id,
+                    "completed" if final.ok else "failed",
+                    final.result,
+                    final.session_id,
+                    final.duration_seconds,
+                    None if final.ok else final.result,
+                    run_id=run_id,
+                )
+                if final.ok:
+                    self._record_node_result(run_id, final)
             self._learn(run_id, results)
 
             ok = not failed_final and (final.ok if final else True)
@@ -274,9 +287,9 @@ class CollabEngine:
         return estimated_timeout > timeout
 
     def _run_node_with_retries(self, run_id: str, node: WBSNode, timeout: int, max_retries: int, split_count: int) -> list[WorkerResult]:
-        self.store.update_node(node.id, "running")
+        self.store.update_node(node.id, "running", run_id=run_id)
         parent = self._run_worker(run_id, node, timeout)
-        self.store.update_node(node.id, "completed" if parent.ok else "failed", parent.result, parent.session_id, parent.duration_seconds, None if parent.ok else parent.result)
+        self.store.update_node(node.id, "completed" if parent.ok else "failed", parent.result, parent.session_id, parent.duration_seconds, None if parent.ok else parent.result, run_id=run_id)
         if parent.ok:
             self._record_node_result(run_id, parent)
         results = [parent]
@@ -287,7 +300,7 @@ class CollabEngine:
             shards = self._split_node(node, split_count)
             for shard in shards:
                 self.store.insert_wbs_node(run_id, shard.to_dict())
-                self.store.update_node(shard.id, "pending")
+                self.store.update_node(shard.id, "pending", run_id=run_id)
             # Phase 1: run read-only context shards (scope + evidence) in parallel
             phase1 = [s for s in shards if not s.dependencies]
             phase2 = [s for s in shards if s.dependencies]
@@ -297,7 +310,7 @@ class CollabEngine:
                     shard = futs[fut]
                     res = fut.result()
                     results.append(res)
-                    self.store.update_node(res.node_id, "completed" if res.ok else "failed", res.result, res.session_id, res.duration_seconds, None if res.ok else res.result)
+                    self.store.update_node(res.node_id, "completed" if res.ok else "failed", res.result, res.session_id, res.duration_seconds, None if res.ok else res.result, run_id=run_id)
                     if res.ok:
                         self._record_node_result(run_id, res)
             # Phase 2: run implementation shards (with phase 1 upstream context)
@@ -307,7 +320,7 @@ class CollabEngine:
                     shard = futs[fut]
                     res = fut.result()
                     results.append(res)
-                    self.store.update_node(res.node_id, "completed" if res.ok else "failed", res.result, res.session_id, res.duration_seconds, None if res.ok else res.result)
+                    self.store.update_node(res.node_id, "completed" if res.ok else "failed", res.result, res.session_id, res.duration_seconds, None if res.ok else res.result, run_id=run_id)
                     if res.ok:
                         self._record_node_result(run_id, res)
         return results
@@ -532,7 +545,24 @@ class CollabEngine:
             self.tool_registry.render_for_prompt(profiles),
         )
 
-    def _run_worker(self, run_id: str, node: WBSNode, timeout: int, model_override: str | None = None) -> WorkerResult:
+    def _env_for_role(self, role: str) -> dict[str, str]:
+        prefix = f"HERMES_COLLAB_{role.upper()}_"
+        env = os.environ.copy()
+        value_map = {
+            "API_KEY": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+            "AUTH_TOKEN": ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"),
+            "BASE_URL": ("ANTHROPIC_BASE_URL",),
+            "MODEL": ("ANTHROPIC_MODEL",),
+        }
+        for source_suffix, targets in value_map.items():
+            value = os.environ.get(prefix + source_suffix)
+            if not value:
+                continue
+            for target in targets:
+                env[target] = value
+        return env
+
+    def _run_worker(self, run_id: str, node: WBSNode, timeout: int, model_override: str | None = None, role: str = "worker") -> WorkerResult:
         worker_id = f"worker_{run_id}_{node.id}_{node.attempt}"
         self.store.worker_start(worker_id, run_id, node.id)
         self.store.log(run_id, "info", "worker started", {"node": node.id, "title": node.title, "agent": self.agent_backend.name}, node.id)
@@ -597,7 +627,19 @@ Output contract:
             )
         try:
             stdin_data = open(tmp_path, "r").read() if tmp_path else None
-            proc = subprocess.run(cmd, cwd=self.cwd, text=True, stdin=subprocess.PIPE if use_stdin else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, input=stdin_data)
+            run_kwargs = {
+                "cwd": self.cwd,
+                "env": self._env_for_role(role),
+                "text": True,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "timeout": timeout,
+            }
+            if use_stdin:
+                run_kwargs["input"] = stdin_data
+            else:
+                run_kwargs["stdin"] = subprocess.DEVNULL
+            proc = subprocess.run(cmd, **run_kwargs)
             duration = round(time.time() - started, 3)
         except subprocess.TimeoutExpired as exc:
             if tmp_path:
@@ -660,10 +702,12 @@ Output contract:
         return parsed, None
 
     def _aggregate(self, run_id: str, request: str, results: list[WorkerResult], timeout: int) -> WorkerResult:
-        node = WBSNode("aggregate", "Aggregate results", "Aggregate worker outputs into final answer", "aggregation", 5, [], False, "Final answer")
+        node = WBSNode(f"{run_id}-aggregate", "Aggregate results", "Aggregate worker outputs into final answer", "aggregation", 5, [], False, "Final answer")
+        self.store.insert_wbs_node(run_id, node.to_dict())
+        self.store.update_node(node.id, "running", run_id=run_id)
         report = json.dumps([r.to_dict() for r in results], ensure_ascii=False, indent=2)
         node.description = f"Original request:\n{request}\n\nWorker results:\n{report}\n\nProduce final concise report. Mention timeouts and shard coverage honestly."
-        return self._run_worker(run_id, node, timeout, model_override=self.leader_model)
+        return self._run_worker(run_id, node, timeout, model_override=self.leader_model, role="leader")
 
     def _learn(self, run_id: str, results: list[WorkerResult]) -> None:
         timeouts = [r for r in results if r.returncode == 124]
