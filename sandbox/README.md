@@ -84,3 +84,67 @@ Isolation checks:
 - Mock service addresses come from `config/sandbox-mocks.json` and are localhost-only.
 - The sandbox API exposes `/api/sandbox/config` so operators can confirm base path, read-only database source, mock endpoints, and public URL.
 - Keep real `~/.hermes` and `~/.claude` secrets outside this repository; use the integration script templates only after manual review.
+
+## Troubleshooting
+
+### Port already in use
+
+If the sandbox fails to start with an error like `OSError: [Errno 98] Address already in use`, another process is listening on port 8876. Use a different port:
+
+```bash
+./scripts/start_sandbox.sh --port 8877
+```
+
+Or find and stop the process holding the port:
+
+```bash
+lsof -ti :8876 | xargs kill -9   # macOS / Linux
+```
+
+### Missing editable install or import errors
+
+If you see `ModuleNotFoundError` for any `hermes_*` package, the project is not installed in the current environment. Run the install script and then reinstall in editable mode:
+
+```bash
+pip install -e .
+```
+
+If you are using a virtual environment, make sure it is activated before running the sandbox.
+
+### Stale or corrupted demo database
+
+If the dashboard shows no data, displays errors, or behaves unexpectedly after an upgrade, reseed the demo database:
+
+```bash
+python3 scripts/seed_demo_data.py --db data/demo_sandbox.sqlite3 --reset
+```
+
+To reuse the current database without reseeding on each restart, pass `--no-reseed`:
+
+```bash
+./scripts/start_sandbox.sh --no-reseed
+```
+
+### Mock mode vs. real worker mode
+
+By default the sandbox runs in **mock mode**: API calls return lightweight pre-recorded payloads and do not contact real workers. This is safe for demos and requires no external configuration.
+
+Pass `--real` only when you want to exercise actual worker execution in a fully isolated sandbox database and workspace. Real mode writes to `data/sandbox_real.sqlite3` and `data/sandbox_workspace/`, not to any production paths.
+
+```bash
+./scripts/start_sandbox.sh          # mock mode (default, safe)
+./scripts/start_sandbox.sh --real   # real worker execution (isolated)
+```
+
+### Do not commit generated files
+
+The following files and directories are generated at runtime and should **never** be committed:
+
+| Path | Reason |
+| --- | --- |
+| `data/demo_sandbox.sqlite3` | Seeded demo database — regenerate with `seed_demo_data.py` |
+| `data/sandbox_real.sqlite3` | Runtime database created by `--real` mode |
+| `data/sandbox_workspace/` | Isolated workspace written by real workers |
+| `logs/` | Runtime log files |
+
+These paths are already covered by the repository `.gitignore`. If you accidentally stage one of them, run `git restore --staged <path>` before committing.
