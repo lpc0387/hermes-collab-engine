@@ -8,9 +8,11 @@ It ships with a real-time **dashboard**, isolated **sandbox**, Leader feedback d
 
 ![Pixel Collab Office Dashboard](docs/screenshots/dashboard.png)
 
+![Hermes collaboration flow demo](docs/demo/hermes-flow.svg)
+
 ## Release and community
 
-If this project helps you, please star it on GitHub to follow the v5.0 release line. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before contributing, report security issues through [`SECURITY.md`](SECURITY.md), follow plans in [`ROADMAP.md`](ROADMAP.md), and review changes in [`CHANGELOG.md`](CHANGELOG.md).
+If this project helps you, please star it on GitHub to follow the v5.0 release line. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before contributing, report security issues through [`SECURITY.md`](SECURITY.md), follow plans in [`ROADMAP.md`](ROADMAP.md), and review changes in [`CHANGELOG.md`](CHANGELOG.md). Optional community launch copy lives in [`docs/launch/v5.0-posts.md`](docs/launch/v5.0-posts.md).
 
 ## One-line deployment
 
