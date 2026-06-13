@@ -198,11 +198,17 @@ class CollabStore:
     def update_node_attempt(self, run_id: str, node_id: str, attempt: int) -> None:
         self._execute("UPDATE wbs_nodes SET attempt=?, updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND id=?", (attempt, run_id, node_id))
 
-    def update_node(self, node_id: str, status: str, result: str | None = None, session_id: str | None = None, duration_seconds: float | None = None, error: str | None = None) -> None:
-        self._execute("""UPDATE wbs_nodes SET status=?, result=COALESCE(?, result), session_id=COALESCE(?, session_id), duration_seconds=COALESCE(?, duration_seconds), error=COALESCE(?, error), updated_at=CURRENT_TIMESTAMP WHERE id=?""", (status, result, session_id, duration_seconds, error, node_id))
+    def update_node(self, node_id: str, status: str, result: str | None = None, session_id: str | None = None, duration_seconds: float | None = None, error: str | None = None, run_id: str | None = None) -> None:
+        if run_id is None:
+            self._execute("""UPDATE wbs_nodes SET status=?, result=COALESCE(?, result), session_id=COALESCE(?, session_id), duration_seconds=COALESCE(?, duration_seconds), error=COALESCE(?, error), updated_at=CURRENT_TIMESTAMP WHERE id=?""", (status, result, session_id, duration_seconds, error, node_id))
+            return
+        self._execute("""UPDATE wbs_nodes SET status=?, result=COALESCE(?, result), session_id=COALESCE(?, session_id), duration_seconds=COALESCE(?, duration_seconds), error=COALESCE(?, error), updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND id=?""", (status, result, session_id, duration_seconds, error, run_id, node_id))
 
-    def update_node_skills_tools(self, node_id: str, skills_json: str | None = None, tools_json: str | None = None) -> None:
-        self._execute("""UPDATE wbs_nodes SET skills_json=COALESCE(?, skills_json), tools_json=COALESCE(?, tools_json), updated_at=CURRENT_TIMESTAMP WHERE id=?""", (skills_json, tools_json, node_id))
+    def update_node_skills_tools(self, node_id: str, skills_json: str | None = None, tools_json: str | None = None, run_id: str | None = None) -> None:
+        if run_id is None:
+            self._execute("""UPDATE wbs_nodes SET skills_json=COALESCE(?, skills_json), tools_json=COALESCE(?, tools_json), updated_at=CURRENT_TIMESTAMP WHERE id=?""", (skills_json, tools_json, node_id))
+            return
+        self._execute("""UPDATE wbs_nodes SET skills_json=COALESCE(?, skills_json), tools_json=COALESCE(?, tools_json), updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND id=?""", (skills_json, tools_json, run_id, node_id))
 
     def worker_start(self, worker_id: str, run_id: str, node_id: str) -> None:
         self._execute("INSERT OR REPLACE INTO workers(id,run_id,node_id,status,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)", (worker_id, run_id, node_id, "running"))
@@ -219,14 +225,25 @@ class CollabStore:
         return {"runs": scalar("SELECT COUNT(*) FROM runs"), "running": scalar("SELECT COUNT(*) FROM runs WHERE status='running'"), "completed": scalar("SELECT COUNT(*) FROM runs WHERE status='completed'"), "failed": scalar("SELECT COUNT(*) FROM runs WHERE status='failed'"), "workers_running": scalar("SELECT COUNT(*) FROM workers WHERE status='running'"), "lessons": scalar("SELECT COUNT(*) FROM lessons")}
 
     def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
-        return [dict(r) for r in self._query("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (limit,))]
+        columns = "id,title,status,created_at,updated_at,completed_at,agent"
+        return [dict(r) for r in self._query(f"SELECT {columns} FROM runs ORDER BY created_at DESC LIMIT ?", (limit,))]
 
-    def run_detail(self, run_id: str) -> dict[str, Any]:
-        run = self._one("SELECT * FROM runs WHERE id=?", (run_id,))
-        return {"run": dict(run) if run else None, "nodes": self.get_nodes(run_id), "workers": [dict(r) for r in self._query("SELECT * FROM workers WHERE run_id=? ORDER BY started_at DESC", (run_id,))], "logs": [dict(r) for r in self._query("SELECT * FROM logs WHERE run_id=? ORDER BY id DESC LIMIT 200", (run_id,))]}
+    def get_node_summaries(self, run_id: str) -> list[dict[str, Any]]:
+        columns = "id,run_id,parent_id,title,capability,complexity,dependencies_json,parallelizable,deliverable,brief,shared_brief,estimated_duration,skills_json,tools_json,status,attempt,checkpoint,session_id,duration_seconds,error,created_at,updated_at"
+        return [dict(r) for r in self._query(f"SELECT {columns} FROM wbs_nodes WHERE run_id=? ORDER BY id", (run_id,))]
+
+    def run_detail(self, run_id: str, full: bool = True, log_limit: int = 200, include_workers: bool = True) -> dict[str, Any]:
+        run_columns = "*" if full else "id,title,status,created_at,updated_at,completed_at,agent"
+        run = self._one(f"SELECT {run_columns} FROM runs WHERE id=?", (run_id,))
+        nodes = self.get_nodes(run_id) if full else self.get_node_summaries(run_id)
+        workers = [dict(r) for r in self._query("SELECT * FROM workers WHERE run_id=? ORDER BY started_at DESC", (run_id,))] if include_workers else []
+        log_columns = "*" if full else "id,run_id,node_id,level,message,created_at"
+        logs = [dict(r) for r in self._query(f"SELECT {log_columns} FROM logs WHERE run_id=? ORDER BY id DESC LIMIT ?", (run_id, log_limit))]
+        return {"run": dict(run) if run else None, "nodes": nodes, "workers": workers, "logs": logs}
 
     def recent_logs(self, limit: int = 200) -> list[dict[str, Any]]:
-        return [dict(r) for r in self._query("SELECT * FROM logs ORDER BY id DESC LIMIT ?", (limit,))]
+        columns = "id,run_id,node_id,level,message,created_at"
+        return [dict(r) for r in self._query(f"SELECT {columns} FROM logs ORDER BY id DESC LIMIT ?", (limit,))]
 
     def lessons(self, limit: int = 100, scope: str | None = None) -> list[dict[str, Any]]:
         if scope is None:

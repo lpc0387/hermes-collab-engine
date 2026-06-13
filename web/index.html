@@ -472,6 +472,7 @@ tr.run-row:hover{background:var(--bg-2)}
   .legend{display:none}
   .brand h1{font-size:13px}
   .submit-bar{padding:10px 12px}
+  .submit-models{grid-template-columns:1fr}
   .submit-actions{flex-direction:column-reverse;align-items:stretch}
   .submit-actions .run-btn{width:100%}
 }
@@ -501,6 +502,21 @@ tr.run-row:hover{background:var(--bg-2)}
   box-shadow:inset 0 0 0 1px var(--gold),0 0 0 2px rgba(255,200,87,.18);
 }
 .submit-bar textarea::placeholder{color:var(--ink-3);font-style:normal}
+.submit-models{
+  display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:8px;
+}
+.submit-models label{
+  display:flex;flex-direction:column;gap:4px;
+  color:var(--ink-3);font-size:13px;font-family:'JetBrains Mono',monospace;
+}
+.submit-models input{
+  background:var(--bg-0);border:1px solid var(--line);color:var(--ink);
+  padding:6px 8px;outline:none;font-family:'VT323','JetBrains Mono',monospace;font-size:16px;
+}
+.submit-models input[readonly]{
+  color:var(--ink-2);background:var(--bg-1);cursor:default;
+}
+.submit-models input[readonly]:focus{border-color:var(--line);box-shadow:none}
 .submit-actions{
   display:flex;align-items:center;justify-content:space-between;gap:12px;
 }
@@ -741,6 +757,10 @@ tr.run-row:hover{background:var(--bg-2)}
   <form class="run-submit" id="runForm">
     <div class="submit-field">
       <textarea id="runRequest" rows="3" placeholder="输入任务描述，Ctrl+Enter 提交…" aria-label="任务描述"></textarea>
+      <div class="submit-models" aria-label="模型选择">
+        <label>Leader 模型<input id="leaderModel" name="leader_model" autocomplete="off" placeholder="加载中…" readonly aria-readonly="true"></label>
+        <label>Worker 模型<input id="workerModel" name="worker_model" autocomplete="off" placeholder="加载中…" readonly aria-readonly="true"></label>
+      </div>
       <div class="submit-actions">
         <span class="submit-hint">Ctrl+Enter 快速提交</span>
         <button class="run-btn" id="runBtn" type="submit" disabled>► 提交协同任务</button>
@@ -891,7 +911,13 @@ const state={
   metricHistory:{runs:[],running:[],workers:[],lessons:[]},
   particles:[],kfocusIdx:-1,
   logFilter:'all',
-  sseHealth:'connecting'
+  sseHealth:'connecting',
+  config:null,
+  refreshTimer:null,
+  refreshInFlight:null,
+  fullRefreshPending:false,
+  lastRunsSig:'',
+  lastRunDetailSig:''
 };
 
 /* ---------- palette + sprite tables ---------- */
@@ -925,7 +951,34 @@ function statusTag(s){
   return `<span class="tag ${d[0]}">${esc(d[1])}</span>`;
 }
 function badgeClass(s){const k=statusKind(s);return k==='done'?'ok':k==='failed'?'bad':k==='running'?'run':'wait'}
+function parseListField(v){
+  if(Array.isArray(v))return v.filter(Boolean);
+  if(v==null||v==='')return [];
+  if(typeof v==='string'){
+    try{const parsed=JSON.parse(v);if(Array.isArray(parsed))return parsed.filter(Boolean)}catch(_e){}
+    return v.split(',').map(x=>x.trim()).filter(Boolean);
+  }
+  return [];
+}
+function normalizeNode(n){
+  if(!n||typeof n!=='object')return n;
+  const skills=parseListField(n.skills).concat(parseListField(n.skills_json));
+  const tools=parseListField(n.tools).concat(parseListField(n.tools_json));
+  return {...n,skills:[...new Set(skills)],tools:[...new Set(tools)]};
+}
 async function getJSON(u){const r=await fetch(API+u);if(!r.ok)throw new Error(`${r.status} ${u}`);return await r.json()}
+async function loadConfig(){
+  try{
+    const cfg=await getJSON('/api/config');state.config=cfg;
+    const leader=$('leaderModel'),worker=$('workerModel');
+    const leaderModel=cfg.effective_leader_model||cfg.leader_model||cfg.model||'';
+    const workerModel=cfg.effective_worker_model||cfg.worker_model||cfg.model||'';
+    if(leader)leader.value=leaderModel;
+    if(worker)worker.value=workerModel;
+    if(leader)leader.placeholder=leaderModel||'Leader 模型';
+    if(worker)worker.placeholder=workerModel||'Worker 模型';
+  }catch(e){console.warn('config',e)}
+}
 async function postJSON(u,payload){
   const r=await fetch(API+u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const data=await r.json().catch(()=>({}));
@@ -1309,21 +1362,58 @@ function renderRuns(){
 }
 
 /* ---------- API loop ---------- */
-async function refresh(){
-  try{
-    const overview=await getJSON('/api/overview');setMetrics(overview);
-    const runs=await getJSON('/api/runs');state.runs=runs||[];renderRuns();
-    maybeAutoPopDiary();
-    const latest=state.runs.find(r=>r.status==='running')||state.runs[0];
-    if(latest)await loadRun(latest.id);
-    else{state.nodes=[];state.agents=[];state.logs=[];renderNodeList();summarizePipeline();renderLogPanel()}
-    setLive('ok','在线');
-  }catch(e){console.error('refresh',e);setLive('bad','离线')}
+function runsSignature(runs){
+  return (runs||[]).map(r=>[r.id,r.status,r.title].join(':')).join('|');
+}
+function runDetailSignature(detail){
+  const run=detail?.run||{};
+  return JSON.stringify({
+    id:run.id||detail?.id||detail?.run_id||state.runId,
+    status:run.status||detail?.status,
+    nodes:(detail?.nodes||[]).map(n=>[n.id,n.status,n.title,n.capability,n.deliverable,n.updated_at].join(':')),
+    logs:(detail?.logs||[]).slice(-80).map(l=>[l.created_at||l.timestamp,l.level,l.node_id,l.message].join(':'))
+  });
+}
+function clearRunView(){
+  state.nodes=[];state.agents=[];state.logs=[];state.lastRunDetailSig='';
+  renderNodeList();summarizePipeline();renderLogPanel();
+}
+async function refresh(options={}){
+  if(state.refreshInFlight){
+    if(options.full)state.fullRefreshPending=true;
+    return state.refreshInFlight;
+  }
+  const full=options.full!==false;
+  state.refreshInFlight=(async()=>{
+    try{
+      const overview=await getJSON('/api/overview');setMetrics(overview);
+      if(full){
+        const runs=await getJSON('/api/runs');
+        const sig=runsSignature(runs||[]);
+        if(sig!==state.lastRunsSig){
+          state.runs=runs||[];state.lastRunsSig=sig;renderRuns();maybeAutoPopDiary();
+        }
+      }
+      const latest=state.runs.find(r=>r.status==='running')||state.runs[0];
+      if(latest)await loadRun(latest.id);
+      else if(state.runId||state.nodes.length||state.logs.length)clearRunView();
+      setLive('ok','在线');
+    }catch(e){console.error('refresh',e);setLive('bad','离线')}
+    finally{state.refreshInFlight=null}
+  })();
+  await state.refreshInFlight;
+  if(state.fullRefreshPending){
+    state.fullRefreshPending=false;
+    return refresh({full:true});
+  }
 }
 async function loadRun(runId){
   const detail=await getJSON('/api/runs/'+encodeURIComponent(runId));if(!detail)return;
+  const sig=runDetailSignature(detail);
   state.runId=runId;state.run=detail;
-  state.nodes=detail.nodes||[];state.logs=detail.logs||[];
+  if(sig===state.lastRunDetailSig)return;
+  state.lastRunDetailSig=sig;
+  state.nodes=(detail.nodes||[]).map(normalizeNode);state.logs=detail.logs||[];
   state.agents=makeAgents(state.nodes);
   renderNodeList();summarizePipeline();renderLogPanel();
 }
@@ -1349,7 +1439,8 @@ async function submitRun(e){
   if(!request){showRunToast('bad','请输入任务描述');syncRunInput();ta.focus();return}
   runBusy=true;btn.textContent='提交中…';syncRunInput();
   try{
-    const data=await postJSON('/api/runs',{request});
+    const payload={request};
+    const data=await postJSON('/api/runs',payload);
     ta.value='';await refresh();
     showRunToast('ok','✓ '+(data.run_id||data.id||'任务已提交'));
   }catch(err){
@@ -1433,7 +1524,7 @@ state.diaryCurrent=null;  // {runId,title,markdown,createdAt}
 function extractLeaderSummary(detail){
   if(!detail||!Array.isArray(detail.logs))return null;
   // 优先找 aggregate worker 的 finished log
-  const log=detail.logs.find(l=>l.node_id==='aggregate'&&l.message==='worker finished');
+  const log=detail.logs.find(l=>(l.node_id==='aggregate'||String(l.node_id||'').endsWith('-aggregate'))&&l.message==='worker finished');
   let md=null,ts=null;
   if(log){
     let d=log.data;
@@ -1446,9 +1537,9 @@ function extractLeaderSummary(detail){
     }
     ts=log.timestamp||log.created_at||null;
   }
-  // 兜底：如果 nodes 里有 id=aggregate 的节点，读它的 result
+  // 兜底：如果 nodes 里有聚合节点，读它的 result
   if(!md&&Array.isArray(detail.nodes)){
-    const agg=detail.nodes.find(n=>n.id==='aggregate');
+    const agg=detail.nodes.find(n=>n.id==='aggregate'||String(n.id||'').endsWith('-aggregate'));
     if(agg&&agg.result)md=agg.result;
   }
   if(!md)return null;
@@ -1516,7 +1607,7 @@ function closeDiary(){$('diaryOverlay').classList.remove('show');state.diaryCurr
 
 async function showDiaryFor(runId){
   if(!runId)return;
-  const detail=runId===state.runId?state.run:await getJSON('/api/runs/'+encodeURIComponent(runId));
+  const detail=await getJSON('/api/runs/'+encodeURIComponent(runId)+'?full=1');
   if(!detail){showRunToast&&showRunToast('bad','✗ 找不到该任务');return}
   const summary=extractLeaderSummary(detail);
   if(!summary){
@@ -1574,8 +1665,10 @@ function wireDiary(){
 }
 
 async function showNode(runId,nodeId){
-  if(runId!==state.runId)await loadRun(runId);
-  const node=state.nodes.find(n=>n.id===nodeId);if(!node)return;
+  const detail=await getJSON('/api/runs/'+encodeURIComponent(runId)+'?full=1');
+  const nodes=(detail.nodes||[]).map(normalizeNode);
+  const logs=detail.logs||[];
+  const node=nodes.find(n=>n.id===nodeId);if(!node)return;
   $('detailTitle').textContent=node.title||node.id;
   $('detailSub').innerHTML=`<code style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--ink-3)">${esc(node.id)}</code> · ${esc(node.capability||'—')} · ${statusTag(node.status)}`;
   let html='';
@@ -1583,7 +1676,7 @@ async function showNode(runId,nodeId){
   if(node.brief)html+=`<p><strong>简介</strong>${esc(node.brief)}</p>`;
   if(node.description)html+=`<p><strong>描述</strong>${esc(node.description)}</p>`;
   if(node.result)html+=`<h3>结果</h3><pre>${esc(node.result)}</pre>`;
-  const nodeLogs=(state.logs||[]).filter(l=>l.node_id===nodeId);
+  const nodeLogs=logs.filter(l=>l.node_id===nodeId);
   const skillLog=nodeLogs.find(l=>l.message==='worker skills selected');
   const toolLog=nodeLogs.find(l=>l.message==='worker tool profiles selected');
   if(skillLog||toolLog){
@@ -1679,7 +1772,7 @@ wireLogChips();
 wireDiary();
 
 /* ---------- boot ---------- */
-refresh();previewCapabilities();
+loadConfig();refresh();previewCapabilities();
 requestAnimationFrame(render);
 requestAnimationFrame(processHover);
 
@@ -1689,7 +1782,7 @@ function connectSSE(){
     const evt=new EventSource('/api/events');
     evt.onopen=()=>setLive('ok','在线');
     evt.onmessage=e=>{
-      try{const d=JSON.parse(e.data);if(d.overview)setMetrics(d.overview);if(d.type||d.run_id)refresh()}catch(err){}
+      try{const d=JSON.parse(e.data);if(d.overview)setMetrics(d.overview);if(d.type||d.run_id)refresh({full:true})}catch(err){}
     };
     evt.onerror=()=>{
       setLive('warn','重连中…');
@@ -1699,7 +1792,7 @@ function connectSSE(){
   }catch(e){setLive('bad','SSE 不可用')}
 }
 connectSSE();
-setInterval(refresh,15000);
+state.refreshTimer=setInterval(()=>refresh({full:true}),15000);
 </script>
 </body>
 </html>

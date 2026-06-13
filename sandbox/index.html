@@ -455,6 +455,67 @@ tr.run-row:hover{background:var(--bg-2)}
 }
 .log-chip.active{border-color:var(--gold);color:var(--gold)}
 
+/* leader diary notebook */
+.diary-overlay{
+  position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+  padding:24px;background:rgba(10,6,12,.72);z-index:130;
+}
+.diary-overlay.show{display:flex}
+.diary-book{
+  width:min(920px,96vw);max-height:88vh;display:grid;grid-template-columns:34px 1fr;
+  filter:drop-shadow(0 8px 0 rgba(0,0,0,.55)) drop-shadow(0 24px 40px rgba(0,0,0,.6));
+}
+.diary-spine{
+  background:linear-gradient(180deg,#6e3f24,#3a2118);
+  border:3px solid #2a160e;border-right:0;
+  box-shadow:inset -5px 0 0 rgba(0,0,0,.28),inset 5px 0 0 rgba(255,216,107,.12);
+  position:relative;
+}
+.diary-spine::before{
+  content:'';position:absolute;inset:10px 12px;
+  background:repeating-linear-gradient(180deg,#f2c76b 0,#f2c76b 5px,transparent 5px,transparent 18px);
+  opacity:.65;
+}
+.diary-page{
+  position:relative;min-height:520px;max-height:88vh;display:flex;flex-direction:column;
+  background:linear-gradient(180deg,#fbe9c4,#f3d8a5);
+  border:3px solid #5a3320;color:#2a1a10;
+  box-shadow:inset 0 0 0 3px rgba(90,51,32,.12);
+}
+.diary-page::before{
+  content:'';position:absolute;left:22px;top:0;bottom:0;width:2px;
+  background:repeating-linear-gradient(180deg,rgba(90,51,32,.35) 0,rgba(90,51,32,.35) 8px,transparent 8px,transparent 18px);
+}
+.diary-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 22px 10px 42px;border-bottom:2px dashed rgba(90,51,32,.35)}
+.diary-stamp{
+  display:inline-block;transform:rotate(-2deg);padding:7px 10px;
+  border:2px solid #8b2f1f;color:#8b2f1f;background:rgba(255,255,255,.16);
+  box-shadow:2px 2px 0 rgba(139,47,31,.35);
+  font-family:'Press Start 2P','VT323','PingFang SC','Microsoft YaHei',sans-serif;font-size:12px;letter-spacing:1px;
+}
+.diary-sub{margin-top:8px;color:#6d4b34;font:14px/1.4 'JetBrains Mono',monospace}
+.diary-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.diary-btn{
+  border:2px solid #5a3320;background:#f2c76b;color:#2a1a10;cursor:pointer;
+  padding:6px 10px;box-shadow:2px 2px 0 #5a3320;
+  font-family:'VT323','PingFang SC','Microsoft YaHei',monospace;font-size:17px;
+}
+.diary-btn:active{transform:translate(2px,2px);box-shadow:0 0 0 #5a3320}
+.diary-close{font-size:24px;line-height:1;padding:2px 10px;background:#eaa06a}
+.diary-content{
+  flex:1;min-height:0;overflow:auto;margin:0 14px 16px 42px;padding:18px 22px;
+  color:#2a1a10;font:17px/1.65 'VT323','PingFang SC','Microsoft YaHei',monospace;
+  scrollbar-width:thin;scrollbar-color:#5a3320 #f3d8a5;
+}
+.diary-content::-webkit-scrollbar{width:10px}.diary-content::-webkit-scrollbar-track{background:#f3d8a5}.diary-content::-webkit-scrollbar-thumb{background:#5a3320;border:2px solid #f3d8a5}
+.diary-content h1,.diary-content h2,.diary-content h3{margin:14px 0 8px;color:#8b2f1f;line-height:1.35}
+.diary-content h1{font-size:24px}.diary-content h2{font-size:21px}.diary-content h3{font-size:19px}
+.diary-content p{margin:8px 0}.diary-content ul,.diary-content ol{margin:8px 0 8px 24px}.diary-content li{margin:3px 0}
+.diary-content pre{overflow:auto;background:#2a1a10;color:#fbe9c4;padding:10px 12px;border:2px solid #5a3320;white-space:pre-wrap}
+.diary-content code{background:rgba(90,51,32,.14);padding:1px 4px}.diary-content pre code{background:transparent;padding:0}
+.diary-content table{width:100%;border-collapse:collapse;margin:10px 0;font-size:15px}.diary-content th,.diary-content td{border:1px solid rgba(90,51,32,.45);padding:5px 7px}.diary-content th{background:rgba(90,51,32,.16)}
+.diary-content blockquote{margin:10px 0;padding:8px 12px;border-left:4px solid #8b2f1f;background:rgba(255,255,255,.18)}
+
 /* --- Responsive --- */
 @media(max-width:1100px){
   .shell{grid-template-columns:1fr}
@@ -612,7 +673,7 @@ tr.run-row:hover{background:var(--bg-2)}
 </header>
 
 <section class="submit-bar pix" aria-label="沙盒说明">
-  <div class="submit-hint">SANDBOX MODE · 当前页面使用本地 Mock API，不读取生产数据库，也不会启动真实 worker。</div>
+  <div class="submit-hint" id="sandboxModeHint">SANDBOX MODE · 当前页面使用本地 Mock API，不读取生产数据库，也不会启动真实 worker。</div>
 </section>
 
 <section class="submit-bar pix" aria-label="任务提交">
@@ -726,6 +787,26 @@ tr.run-row:hover{background:var(--bg-2)}
   </div>
 </div>
 
+<div class="diary-overlay" id="diaryOverlay" aria-hidden="true">
+  <div class="diary-book" role="dialog" aria-modal="true" aria-labelledby="diaryTitle">
+    <div class="diary-spine" aria-hidden="true"></div>
+    <div class="diary-page">
+      <div class="diary-head">
+        <div>
+          <div class="diary-stamp" id="diaryTitle">📓 LEADER 日记本</div>
+          <div class="diary-sub" id="diarySub">等待 leader 汇总结果…</div>
+        </div>
+        <div class="diary-actions">
+          <button class="diary-btn" id="copyDiaryBtn" type="button">复制</button>
+          <button class="diary-btn" id="downloadDiaryBtn" type="button">下载</button>
+          <button class="diary-btn diary-close" id="closeDiaryBtn" type="button" aria-label="关闭日记本">×</button>
+        </div>
+      </div>
+      <div class="diary-content" id="diaryContent"><p>暂无 leader 汇总。</p></div>
+    </div>
+  </div>
+</div>
+
 <script>
 'use strict';
 /* =========================================================
@@ -734,6 +815,7 @@ tr.run-row:hover{background:var(--bg-2)}
 const SANDBOX_CONFIG=window.__HERMES_SANDBOX_CONFIG__||{};
 const API=(SANDBOX_CONFIG.apiBase&&SANDBOX_CONFIG.apiBase!=='/')?SANDBOX_CONFIG.apiBase:'';
 const SANDBOX_MODE=true;
+const SANDBOX_REAL=!!SANDBOX_CONFIG.realExecution;
 const $=id=>document.getElementById(id);
 const canvas=$('officeCanvas');
 const ctx=canvas.getContext('2d');
@@ -746,7 +828,10 @@ const state={
   metricHistory:{runs:[],running:[],workers:[],lessons:[]},
   particles:[],kfocusIdx:-1,
   logFilter:'all',
-  sseHealth:'connecting'
+  sseHealth:'connecting',
+  diaryShown:new Set(),
+  diaryMarkdown:'',
+  diaryRunId:null
 };
 
 /* ---------- palette + sprite tables ---------- */
@@ -1159,14 +1244,96 @@ function renderRuns(){
   el.querySelectorAll('[data-run]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();showRunDetail(a.dataset.run)}));
 }
 
+/* ---------- leader diary ---------- */
+function logData(log){
+  let d=log?.data;
+  if(d==null&&log?.data_json!=null)d=log.data_json;
+  if(typeof d==='string'){
+    try{d=JSON.parse(d)}catch(_e){}
+  }
+  return d||{};
+}
+function extractLeaderSummary(detail){
+  if(!detail)return null;
+  const logs=Array.isArray(detail.logs)?detail.logs:[];
+  const agg=[...logs].find(l=>l.node_id==='aggregate'&&l.message==='worker finished');
+  let markdown=null,source='aggregate log';
+  if(agg){
+    const d=logData(agg);
+    markdown=d.result||d.summary||d.text||null;
+  }
+  if(!markdown&&Array.isArray(detail.nodes)){
+    const n=detail.nodes.find(x=>x.id==='aggregate'||String(x.title||'').toLowerCase().includes('aggregate'));
+    if(n?.result){markdown=n.result;source='aggregate node'}
+  }
+  if(!markdown&&Array.isArray(detail.nodes)&&detail.nodes.length===1&&(detail.run?.status||detail.status)==='completed'){
+    const n=detail.nodes[0];
+    if(n?.result){markdown=n.result;source='direct node result'}
+  }
+  if(!markdown)return null;
+  return {markdown:String(markdown),source};
+}
+function renderMarkdown(md){
+  const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const code=[];
+  let text=String(md||'').replace(/```([\s\S]*?)```/g,(_,body)=>`\u0000CODE${code.push(`<pre><code>${escapeHtml(body.trim())}</code></pre>`)-1}\u0000`);
+  text=escapeHtml(text);
+  text=text.replace(/\u0000CODE(\d+)\u0000/g,(_,i)=>code[Number(i)]||'');
+  text=text.replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>');
+  text=text.replace(/^&gt; (.+)$/gm,'<blockquote>$1</blockquote>');
+  text=text.replace(/((?:^\|.+\|\n)+)/gm,block=>{
+    const rows=block.trim().split('\n').filter(r=>!/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(r));
+    if(rows.length<2)return block;
+    return '<table>'+rows.map((r,idx)=>'<tr>'+r.split('|').slice(1,-1).map(c=>idx?`<td>${c.trim()}</td>`:`<th>${c.trim()}</th>`).join('')+'</tr>').join('')+'</table>';
+  });
+  text=text.replace(/(?:^[-*] .+(?:\n|$))+/gm,block=>'<ul>'+block.trim().split('\n').map(x=>`<li>${x.replace(/^[-*] /,'')}</li>`).join('')+'</ul>');
+  text=text.replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  return text.split(/\n{2,}/).map(p=>/^\s*<(h\d|ul|ol|table|pre|blockquote)/.test(p)?p:`<p>${p.replace(/\n/g,'<br>')}</p>`).join('');
+}
+function openDiary(runId,markdown,source){
+  state.diaryMarkdown=markdown;state.diaryRunId=runId;state.diaryShown.add(runId);
+  $('diarySub').textContent=`${runId} · ${source||'leader 汇总'} · 可滚动查看`;
+  $('diaryContent').innerHTML=renderMarkdown(markdown);
+  $('diaryOverlay').classList.add('show');
+  $('diaryOverlay').setAttribute('aria-hidden','false');
+}
+function closeDiary(){
+  $('diaryOverlay').classList.remove('show');
+  $('diaryOverlay').setAttribute('aria-hidden','true');
+}
+function maybeAutoPopDiary(){
+  const d=state.run;if(!d||!state.runId||d.status!=='completed'||state.diaryShown.has(state.runId))return;
+  const s=extractLeaderSummary(d);if(s)openDiary(state.runId,s.markdown,s.source);
+}
+function copyDiary(){
+  if(!state.diaryMarkdown)return;
+  navigator.clipboard?.writeText(state.diaryMarkdown).then(()=>showRunToast('ok','已复制 leader 日记')).catch(()=>showRunToast('bad','复制失败'));
+}
+function downloadDiary(){
+  if(!state.diaryMarkdown)return;
+  const blob=new Blob([state.diaryMarkdown],{type:'text/markdown;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download=`${state.diaryRunId||'leader'}-diary.md`;a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+
 /* ---------- API loop ---------- */
+function pickVisibleRun(runs){
+  if(!runs||!runs.length)return null;
+  if(state.runId){
+    const current=runs.find(r=>r.id===state.runId);
+    if(current)return current;
+  }
+  return runs[0];
+}
 async function refresh(){
   try{
     const overview=await getJSON('/api/overview');setMetrics(overview);
     const runs=await getJSON('/api/runs');state.runs=runs||[];renderRuns();
-    const latest=state.runs.find(r=>r.status==='running')||state.runs[0];
+    const latest=pickVisibleRun(state.runs);
     if(latest)await loadRun(latest.id);
     else{state.nodes=[];state.agents=[];state.logs=[];renderNodeList();summarizePipeline();renderLogPanel()}
+    maybeAutoPopDiary();
     setLive('ok',SANDBOX_MODE?'沙盒在线':'在线');
   }catch(e){console.error('refresh',e);setLive('bad','离线')}
 }
@@ -1200,7 +1367,9 @@ async function submitRun(e){
   runBusy=true;btn.textContent='提交中…';syncRunInput();
   try{
     const data=await postJSON('/api/runs',{request});
-    ta.value='';await refresh();
+    ta.value='';
+    if(data.run_id)state.runId=data.run_id;
+    await refresh();
     showRunToast('ok','✓ '+(data.run_id||data.id||'任务已提交'));
   }catch(err){
     showRunToast('bad','✗ 提交失败：'+(err.message||'未知错误'));
@@ -1236,11 +1405,14 @@ async function showRunDetail(runId){
   await loadRun(runId);const d=state.run;if(!d)return;
   $('detailTitle').textContent=d.title||runId;
   $('detailSub').innerHTML=`<code style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--ink-3)">${esc(runId)}</code> · ${statusTag(d.status)} · ${esc(d.created_at||'')}`;
-  let html='<h3>WBS 节点</h3>';
+  const leader=extractLeaderSummary(d);
+  let html=leader?`<p><button class="preview-btn" type="button" id="openLeaderDiaryBtn">📓 打开 leader 日记本</button></p>`:'';
+  html+='<h3>WBS 节点</h3>';
   html+=state.nodes.length?
     `<table class="runs-table"><thead><tr><th>编号</th><th>标题</th><th>能力</th><th>状态</th></tr></thead><tbody>${state.nodes.map(n=>`<tr><td><code style="font-family:'JetBrains Mono',monospace;font-size:12px">${esc(n.id)}</code></td><td>${esc(n.title)}</td><td>${esc(n.capability||'—')}</td><td>${statusTag(n.status)}</td></tr>`).join('')}</tbody></table>`
     :'<div class="empty-msg">暂无节点</div>';
   $('detailContent').innerHTML=html;
+  if(leader&&$('openLeaderDiaryBtn'))$('openLeaderDiaryBtn').addEventListener('click',()=>openDiary(runId,leader.markdown,leader.source));
   openOverlay();
 }
 function renderLogPanel(){
@@ -1346,7 +1518,7 @@ function highlightNodeRow(){
   if(row)row.scrollIntoView({block:'nearest',behavior:'smooth'});
 }
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape')closeOverlay();
+  if(e.key==='Escape'){closeOverlay();closeDiary()}
   if(e.key==='/'&&e.target===document.body){e.preventDefault();$('runSearch').focus()}
 });
 
@@ -1372,8 +1544,18 @@ $('runForm').addEventListener('submit',submitRun);
 $('runRequest').addEventListener('input',syncRunInput);
 $('runRequest').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')$('runForm').requestSubmit()});
 syncRunInput();
+if($('sandboxModeHint')){
+  const q=SANDBOX_CONFIG.quota||{};
+  $('sandboxModeHint').textContent=SANDBOX_REAL
+    ?`SANDBOX REAL · 已启用真实 worker · 隔离数据库/工作区 · 生产执行禁用 · 额度 ${q.used||0}/${q.limit||2}`
+    :'SANDBOX MODE · 当前页面使用本地 Mock API，不读取生产数据库，也不会启动真实 worker。';
+}
 $('previewBtn').addEventListener('click',previewCapabilities);
 $('closeDetailBtn').addEventListener('click',closeOverlay);
+$('closeDiaryBtn').addEventListener('click',closeDiary);
+$('copyDiaryBtn').addEventListener('click',copyDiary);
+$('downloadDiaryBtn').addEventListener('click',downloadDiary);
+$('diaryOverlay').addEventListener('click',e=>{if(e.target.id==='diaryOverlay')closeDiary()});
 $('detailOverlay').addEventListener('click',e=>{if(e.target.id==='detailOverlay')closeOverlay()});
 $('runSearch').addEventListener('input',renderRuns);
 wireLogChips();

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,11 +19,23 @@ class DashboardServer:
         self.port = port
         self.db_path = db_path
         self.cwd = cwd
-        self.model = model
-        self.leader_model = leader_model
-        self.worker_model = worker_model
+        env_model = os.environ.get("HERMES_COLLAB_MODEL") or os.environ.get("ANTHROPIC_MODEL")
+        self.model = model or env_model
+        self.leader_model = leader_model or model or os.environ.get("HERMES_COLLAB_LEADER_MODEL") or env_model
+        self.worker_model = worker_model or model or os.environ.get("HERMES_COLLAB_WORKER_MODEL") or env_model
         self.agent = agent
         self.store = CollabStore(db_path)
+
+    def config_payload(self) -> dict:
+        return {
+            "model": self.model,
+            "leader_model": self.leader_model,
+            "worker_model": self.worker_model,
+            "effective_leader_model": self.leader_model,
+            "effective_worker_model": self.worker_model,
+            "model_overrides_readonly": True,
+            "agent": self.agent,
+        }
 
     def skills_payload(self, node_type: str = "", task: str = "") -> list[dict]:
         from .skills import get_default_registry
@@ -62,7 +75,14 @@ class DashboardServer:
                 elif path == "/api/runs":
                     self._json(outer.store.list_runs())
                 elif path.startswith("/api/runs/"):
-                    self._json(outer.store.run_detail(path.rsplit("/", 1)[-1]))
+                    query = parse_qs(urlparse(self.path).query)
+                    full = (query.get("full") or [""])[0].lower() in {"1", "true", "yes"}
+                    log_limit_raw = (query.get("log_limit") or ["80"])[0]
+                    try:
+                        log_limit = max(0, min(200, int(log_limit_raw)))
+                    except ValueError:
+                        log_limit = 80
+                    self._json(outer.store.run_detail(path.rsplit("/", 1)[-1], full=full, log_limit=log_limit, include_workers=full))
                 elif path == "/api/logs":
                     self._json(outer.store.recent_logs())
                 elif path == "/api/lessons":
@@ -80,6 +100,8 @@ class DashboardServer:
                     node_type = (query.get("node_type") or [""])[0]
                     task = (query.get("task") or [""])[0]
                     self._json(outer.tools_payload(node_type, task))
+                elif path == "/api/config":
+                    self._json(outer.config_payload())
                 elif path == "/api/events":
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
@@ -110,7 +132,14 @@ class DashboardServer:
                     request = str(data.get("request") or "").strip()
                     if not request:
                         return self._json({"error": "request is required"}, 400)
-                    engine = CollabEngine(outer.db_path, outer.cwd, outer.model, leader_model=outer.leader_model, worker_model=outer.worker_model, agent=outer.agent)
+                    engine = CollabEngine(
+                        outer.db_path,
+                        outer.cwd,
+                        outer.model,
+                        leader_model=outer.leader_model,
+                        worker_model=outer.worker_model,
+                        agent=outer.agent,
+                    )
                     def run_async():
                         engine.run(
                             request,
