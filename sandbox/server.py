@@ -578,15 +578,37 @@ def _run_real_sandbox_task(run_id: str, request: str, db_path: Path, cwd: Path, 
                 break
 
 
+def _reset_sandbox_state(db_path: Path) -> None:
+    """On startup, wipe all run data from the sandbox DB.
+
+    Skills, MCP, and agents come from code registries (read-only) and are
+    not affected.  This ensures each sandbox session starts completely fresh:
+    no stale runs, no resume context, no orphan workers.
+    """
+    global REAL_RUNS_USED
+    REAL_RUNS_USED = 0
+    RUNS.clear()
+    RUN_DETAILS.clear()
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=1)
+        for table in ("runs", "wbs_nodes", "workers", "logs",
+                       "node_results", "run_state", "context_snapshots", "metrics"):
+            conn.execute(f"DELETE FROM [{table}]")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def add_real_sandbox_run(request: str) -> dict:
     global REAL_RUNS_USED
-    max_runs = max(0, env_int("HERMES_SANDBOX_REAL_RUN_LIMIT", 2))
+    max_runs = max(0, env_int("HERMES_SANDBOX_REAL_RUN_LIMIT", 5))
     with REAL_RUN_LOCK:
         if REAL_RUNS_USED >= max_runs:
             return {"accepted": False, "sandbox": True, "error": f"沙盒真实任务额度已用完（{REAL_RUNS_USED}/{max_runs}）"}
         REAL_RUNS_USED += 1
         used = REAL_RUNS_USED
-        SANDBOX_CONFIG.setdefault("quota", {})["used"] = REAL_RUNS_USED
+        SANDBOX_CONFIG.setdefault("quota", {})["used"] = used
 
     created = now_iso()
     placeholder_id = f"sandbox-real-pending-{used:03d}"
@@ -615,6 +637,7 @@ def add_real_sandbox_run(request: str) -> dict:
 
 class SandboxHandler(BaseHTTPRequestHandler):
     server: ThreadingHTTPServer
+    protocol_version = "HTTP/1.1"
 
     def _json(self, data, status: int = 200) -> None:
         body = json.dumps(data, ensure_ascii=False, indent=2).encode()
@@ -714,11 +737,18 @@ class SandboxHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.end_headers()
             try:
+                heartbeat_counter = 0
                 while True:
                     latest_logs = RUN_DETAILS[RUNS[0]["id"]]["logs"][-10:] if RUNS else []
                     payload = json.dumps({"type": "sandbox", "overview": overview(), "logs": latest_logs}, ensure_ascii=False)
                     self.wfile.write(f"data: {payload}\n\n".encode())
                     self.wfile.flush()
+                    heartbeat_counter += 1
+                    # 每 15 次数据推送（约 30 秒）发送一次 keepalive 注释，防止代理/防火墙断开空闲连接
+                    if heartbeat_counter >= 15:
+                        self.wfile.write(b":keepalive\n\n")
+                        self.wfile.flush()
+                        heartbeat_counter = 0
                     time.sleep(2)
             except Exception:
                 pass
@@ -835,8 +865,7 @@ def main() -> int:
         if db_path is None:
             db_path = (REPO_ROOT / "data" / "sandbox_real.sqlite3").resolve()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        if db_path.exists():
-            load_db_snapshot(db_path)
+        _reset_sandbox_state(db_path)
         DATA_SOURCE = f"sandbox-real:{db_path}"
     elif db_path:
         load_db_snapshot(db_path)
@@ -850,7 +879,7 @@ def main() -> int:
         "mockConfig": mock_config,
         "productionExecution": "disabled",
         "realExecution": REAL_EXECUTION,
-        "quota": {"used": REAL_RUNS_USED, "limit": env_int("HERMES_SANDBOX_REAL_RUN_LIMIT", 2), "concurrency": env_int("HERMES_SANDBOX_CONCURRENCY", 1), "timeout": env_int("HERMES_SANDBOX_TIMEOUT", 240), "max_retries": env_int("HERMES_SANDBOX_MAX_RETRIES", 0)},
+        "quota": {"used": REAL_RUNS_USED, "limit": env_int("HERMES_SANDBOX_REAL_RUN_LIMIT", 5), "concurrency": env_int("HERMES_SANDBOX_CONCURRENCY", 1), "timeout": env_int("HERMES_SANDBOX_TIMEOUT", 240), "max_retries": env_int("HERMES_SANDBOX_MAX_RETRIES", 0)},
         "aggregate": env_bool("HERMES_SANDBOX_AGGREGATE", True),
         "ttlSeconds": ttl_seconds,
     }

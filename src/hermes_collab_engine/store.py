@@ -45,17 +45,65 @@ class CollabStore:
     def _cleanup_stale_workers(self) -> None:
         """On startup, mark any orphaned 'running' workers as failed.
 
-        A worker is stale if its status is 'running' but its parent run has
-        already reached a terminal state (completed or failed). This prevents
-        ghost workers from showing up in the dashboard after a crash.
-        Workers for runs still being built (e.g. status='created') are left
-        alone since they may still be scheduled.
+        A worker is stale if its status is 'running' but either:
+        (a) its parent run has reached a terminal state (completed/failed), or
+        (b) its parent run is still 'running' — which means the previous engine
+            process died without cleaning up (engine restart scenario).
+
+        Since this runs at store init time (before any new work is scheduled),
+        ALL 'running' workers are guaranteed to be from a previous incarnation.
         """
+        # Case 1: workers whose parent run is already terminal
         self._execute(
             """UPDATE workers SET status='failed',
                error='auto-cleanup: stale orphan from non-running parent',
                updated_at=CURRENT_TIMESTAMP
                WHERE status='running'
+                 AND run_id IN (SELECT id FROM runs WHERE status IN ('completed','failed'))"""
+        )
+        # Case 2: workers whose parent run is still 'running' — previous engine crashed.
+        # These runs may have pending/running nodes that also need cleanup.
+        stale_run_ids = [
+            row["id"] for row in self._query(
+                "SELECT id FROM runs WHERE status = 'running'"
+            )
+        ]
+        if stale_run_ids:
+            placeholders = ",".join("?" * len(stale_run_ids))
+            # Mark stale workers as failed
+            self._execute(
+                f"""UPDATE workers SET status='failed',
+                   error='auto-cleanup: stale worker from previous engine incarnation',
+                   updated_at=CURRENT_TIMESTAMP
+                   WHERE status='running'
+                     AND run_id IN ({placeholders})""",
+                tuple(stale_run_ids),
+            )
+            # Mark pending/running nodes as failed
+            self._execute(
+                f"""UPDATE wbs_nodes SET status='failed',
+                   error='auto-cleanup: engine restarted while run was active',
+                   updated_at=CURRENT_TIMESTAMP
+                   WHERE status IN ('running','pending')
+                     AND run_id IN ({placeholders})""",
+                tuple(stale_run_ids),
+            )
+            # Finally mark the runs themselves as failed
+            self._execute(
+                """UPDATE runs SET status='failed',
+                   updated_at=CURRENT_TIMESTAMP,
+                   completed_at=CURRENT_TIMESTAMP
+                   WHERE status='running'"""
+            )
+        # Case 3: orphaned pending nodes in terminal runs.
+        # These are nodes whose dependencies can never be satisfied because
+        # the parent run already completed/failed (e.g. a shard plan where
+        # the engine crashed after partial execution but before cleanup).
+        self._execute(
+            """UPDATE wbs_nodes SET status='failed',
+               error='auto-cleanup: orphaned pending node in terminal run',
+               updated_at=CURRENT_TIMESTAMP
+               WHERE status='pending'
                  AND run_id IN (SELECT id FROM runs WHERE status IN ('completed','failed'))"""
         )
 

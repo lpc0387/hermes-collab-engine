@@ -1093,6 +1093,16 @@ tr.run-row:hover{background:var(--bg-2)}
   </div>
 </div>
 
+<!-- 额度用尽弹窗 -->
+<div class="modal-overlay" id="quotaModal">
+  <div class="modal-box" style="text-align:center">
+    <h2>⚠ 额度已用尽</h2>
+    <p id="quotaMsg" style="font-family:'JetBrains Mono',monospace;color:var(--ink-2);margin:16px 0"></p>
+    <p style="font-size:13px;color:var(--ink-3);margin-bottom:20px">真实 worker 额度已耗尽，无法提交新任务。<br>如需追加额度，请重启沙盒服务。</p>
+    <button class="modal-submit" onclick="$('quotaModal').classList.remove('show')" type="button">知道了</button>
+  </div>
+</div>
+
 <div class="diary-overlay" id="diaryOverlay" aria-hidden="true">
   <div class="diary-book" role="dialog" aria-modal="true" aria-labelledby="diaryTitle">
     <div class="diary-spine" aria-hidden="true"></div>
@@ -1656,7 +1666,7 @@ async function loadRun(runId){
 }
 
 /* ---------- run submit ---------- */
-let runBusy=false,runToastTimer=null;
+let runBusy=false,runToastTimer=null,quotaExceeded=false;
 function showRunToast(kind,msg){
   const el=$('runToast');clearTimeout(runToastTimer);
   el.classList.remove('ok','bad');if(kind)el.classList.add(kind);
@@ -1668,11 +1678,11 @@ function syncRunInput(){
   ta.style.height='auto';
   const max=(parseFloat(cs.lineHeight)||24)*8+parseFloat(cs.paddingTop)+parseFloat(cs.paddingBottom);
   ta.style.height=Math.min(ta.scrollHeight,max)+'px';
-  btn.disabled=runBusy||!ta.value.trim();
+  btn.disabled=quotaExceeded||runBusy||!ta.value.trim();
   syncActionCards();
 }
 async function enableResume(){
-  const btn=$('resumeBtn');btn.disabled=true;
+  const btn=$('resumeBtn');if(btn)btn.disabled=true;
   try{
     const ctx=await getJSON('/api/resume-context');
     state.resumeContext=ctx;state.resumeEnabled=true;btn.classList.add('active');
@@ -1683,6 +1693,7 @@ async function enableResume(){
 }
 async function submitRun(e){
   e.preventDefault();
+  if(quotaExceeded){$('quotaModal').classList.add('show');return}
   const ta=$('runRequest'),btn=$('runBtn'),request=ta.value.trim();
   if(!request){showRunToast('bad','请输入任务描述');syncRunInput();ta.focus();return}
   runBusy=true;btn.textContent='提交中…';syncRunInput();
@@ -1691,15 +1702,24 @@ async function submitRun(e){
     if(state.resumeEnabled&&state.resumeContext){payload.resume=true;payload.resume_run_id=state.resumeContext.run.id}
     const data=await postJSON('/api/runs',payload);
     ta.value='';state.resumeEnabled=false;state.resumeContext=null;
-    const resumeBtn=$('resumeBtn');resumeBtn.classList.remove('active');resumeBtn.textContent='↩ 接入上次会话';
+    const resumeBtn=$('resumeBtn');if(resumeBtn){resumeBtn.classList.remove('active');resumeBtn.textContent='↩ 接入上次会话';}
     const resumeCard=$('resumeCard');resumeCard?.classList.remove('active');if($('resumeHint'))$('resumeHint').textContent='恢复上次运行';
     if(data.run_id)state.runId=data.run_id;
     await refresh();
     showRunToast('ok','✓ '+(data.run_id||data.id||'任务已提交'));
   }catch(err){
-    showRunToast('bad','✗ 提交失败：'+(err.message||'未知错误'));
+    const msg=err.message||'未知错误';
+    if(msg.includes('额度已用完')){
+      quotaExceeded=true;
+      $('quotaMsg').textContent=msg;
+      $('quotaModal').classList.add('show');
+      showRunToast('bad','额度已用尽');
+      syncRunInput();
+    }else{
+      showRunToast('bad','✗ 提交失败：'+msg);
+    }
   }finally{
-    runBusy=false;btn.textContent='► 提交协同任务';syncRunInput();syncActionCards();
+    runBusy=false;btn.textContent=quotaExceeded?'✗ 额度已用尽':'► 提交协同任务';syncRunInput();syncActionCards();
   }
 }
 
@@ -1868,7 +1888,7 @@ setInterval(tickClock,1000);tickClock();
 $('runForm').addEventListener('submit',submitRun);
 $('runRequest').addEventListener('input',syncRunInput);
 $('runRequest').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')$('runForm').requestSubmit()});
-$('resumeBtn').addEventListener('click',enableResume);
+$('resumeBtn')?.addEventListener('click',enableResume);
 syncRunInput();
 if($('sandboxModeHint')){
   const q=SANDBOX_CONFIG.quota||{};

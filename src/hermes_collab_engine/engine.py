@@ -143,6 +143,8 @@ class CollabEngine:
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
                 running: dict[concurrent.futures.Future[list[WorkerResult]], WBSNode] = {}
+                running_started: dict[concurrent.futures.Future, float] = {}  # future -> start time
+                _STALL_CHECK_INTERVAL = 60  # seconds between stale-worker checks
                 while pending or running:
                     while pending and len(running) < max_workers:
                         if run_id in self._paused_runs:
@@ -214,6 +216,7 @@ class CollabEngine:
 
                         future = pool.submit(self._run_node_with_retries, run_id, node, self._effective_timeout(node, timeout), max_retries, split_count)
                         running[future] = node
+                        running_started[future] = time.time()
 
                     if not running:
                         if self._checkpoint_paused_nodes:
@@ -221,9 +224,22 @@ class CollabEngine:
                             break
                         continue
 
-                    done, _ = concurrent.futures.wait(running.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
+                    done, _ = concurrent.futures.wait(running.keys(), timeout=_STALL_CHECK_INTERVAL, return_when=concurrent.futures.FIRST_COMPLETED)
+                    # Stale worker watchdog: cancel futures that have been running too long
+                    if not done and running:
+                        now = time.time()
+                        for fut, node in list(running.items()):
+                            effective_timeout = self._effective_timeout(node, timeout)
+                            elapsed = now - running_started.get(fut, now)
+                            # Allow 2x the subprocess timeout as a safety margin
+                            if elapsed > effective_timeout * 2:
+                                self.store.log(run_id, "warning", "stale worker watchdog: cancelling hung future",
+                                    {"node": node.id, "elapsed_seconds": round(elapsed), "timeout": effective_timeout}, node.id)
+                                fut.cancel()
+                                done.add(fut)
                     for fut in done:
                         node = running.pop(fut)
+                        running_started.pop(fut, None)
                         self._release_fingerprint(node.id)
                         self._release_write_targets(node.id)
                         try:
@@ -233,6 +249,15 @@ class CollabEngine:
                             result = WorkerResult(node.id, node.title, False, f"Worker crashed: {type(exc).__name__}: {exc}", None, duration, 1, "", node.attempt)
                             self.store.update_node(node.id, "failed", result.result, None, duration, result.result, run_id=run_id)
                             self.store.log(run_id, "error", "worker future failed", result.to_dict(), node.id)
+                            node_results = [result]
+                        except BaseException as exc:
+                            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                                raise  # must propagate; outer handler does cleanup
+                            # Handles CancelledError from stale-worker watchdog
+                            duration = 0.0
+                            result = WorkerResult(node.id, node.title, False, f"Worker cancelled: {type(exc).__name__}: {exc}", None, duration, 1, "", node.attempt)
+                            self.store.update_node(node.id, "failed", result.result, None, duration, result.result, run_id=run_id)
+                            self.store.log(run_id, "warning", "worker future cancelled", result.to_dict(), node.id)
                             node_results = [result]
 
                         results.extend(node_results)
@@ -419,7 +444,18 @@ class CollabEngine:
 
     def _run_node_with_retries(self, run_id: str, node: WBSNode, timeout: int, max_retries: int, split_count: int) -> list[WorkerResult]:
         self.store.update_node(node.id, "running", run_id=run_id)
-        parent = self._run_worker(run_id, node, timeout)
+        try:
+            parent = self._run_worker(run_id, node, timeout)
+        except Exception as exc:
+            # Prevent node from being stuck in 'running' state if _run_worker
+            # raises an unexpected exception (e.g. OSError, ValueError).
+            duration = 0.0
+            parent = WorkerResult(node.id, node.title, False,
+                f"Worker crashed unexpectedly: {type(exc).__name__}: {exc}",
+                None, duration, 1, str(exc), node.attempt)
+            self.store.worker_finish(f"worker_{run_id}_{node.id}_{node.attempt}", "failed", duration, None, str(exc))
+            self.store.log(run_id, "error", "worker crashed in _run_node_with_retries",
+                {"node": node.id, "error": str(exc)}, node.id)
         self.store.update_node(node.id, "completed" if parent.ok else "failed", parent.result, parent.session_id, parent.duration_seconds, None if parent.ok else parent.result, run_id=run_id)
         if parent.ok:
             self._record_node_result(run_id, parent)
@@ -439,7 +475,13 @@ class CollabEngine:
                 futs = {pool.submit(self._run_worker, run_id, s, timeout): s for s in phase1}
                 for fut in concurrent.futures.as_completed(futs):
                     shard = futs[fut]
-                    res = fut.result()
+                    try:
+                        res = fut.result()
+                    except Exception as exc:
+                        duration = 0.0
+                        res = WorkerResult(shard.id, shard.title, False, f"Shard crashed: {type(exc).__name__}: {exc}", None, duration, 1, "", shard.attempt)
+                        self.store.update_node(shard.id, "failed", res.result, None, duration, res.result, run_id=run_id)
+                        self.store.log(run_id, "error", "shard future failed", res.to_dict(), shard.id)
                     results.append(res)
                     self.store.update_node(res.node_id, "completed" if res.ok else "failed", res.result, res.session_id, res.duration_seconds, None if res.ok else res.result, run_id=run_id)
                     if res.ok:
@@ -449,7 +491,13 @@ class CollabEngine:
                 futs = {pool.submit(self._run_worker, run_id, s, timeout): s for s in phase2}
                 for fut in concurrent.futures.as_completed(futs):
                     shard = futs[fut]
-                    res = fut.result()
+                    try:
+                        res = fut.result()
+                    except Exception as exc:
+                        duration = 0.0
+                        res = WorkerResult(shard.id, shard.title, False, f"Shard crashed: {type(exc).__name__}: {exc}", None, duration, 1, "", shard.attempt)
+                        self.store.update_node(shard.id, "failed", res.result, None, duration, res.result, run_id=run_id)
+                        self.store.log(run_id, "error", "shard future failed", res.to_dict(), shard.id)
                     results.append(res)
                     self.store.update_node(res.node_id, "completed" if res.ok else "failed", res.result, res.session_id, res.duration_seconds, None if res.ok else res.result, run_id=run_id)
                     if res.ok:
@@ -949,6 +997,7 @@ Output contract:
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
                 "timeout": timeout,
+                "start_new_session": True,  # isolate process group so timeout kills entire tree
             }
             if use_stdin:
                 run_kwargs["input"] = stdin_data

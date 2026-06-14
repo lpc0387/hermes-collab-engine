@@ -9,7 +9,7 @@
 #   ./scripts/start_sandbox.sh 0.5          # 运行 30 分钟
 #   ./scripts/start_sandbox.sh --hours 8    # 8 小时
 #   ./scripts/start_sandbox.sh --port 8877  # 自定义端口
-#   ./scripts/start_sandbox.sh --real       # 隔离数据库/工作区中启用真实 worker（默认最多 2 个任务）
+#   ./scripts/start_sandbox.sh --real       # 隔离数据库/工作区中启用真实 worker（默认最多 5 轮对话）
 #   HOURS=3 ./scripts/start_sandbox.sh      # 环境变量
 
 set -euo pipefail
@@ -17,12 +17,12 @@ set -euo pipefail
 # ---------- 配置默认值 ----------
 DEFAULT_HOURS="${HOURS:-2}"
 HOURS="$DEFAULT_HOURS"
-HOST="${HOST:-127.0.0.1}"
+HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8876}"
 DB="${DB:-data/demo_sandbox.sqlite3}"
 RESEED="${RESEED:-1}"  # 1=每次启动重置数据；0=保留
 REAL="${HERMES_SANDBOX_REAL_EXECUTION:-0}"
-REAL_LIMIT="${HERMES_SANDBOX_REAL_RUN_LIMIT:-2}"
+REAL_LIMIT="${HERMES_SANDBOX_REAL_RUN_LIMIT:-5}"
 WORKSPACE="${HERMES_SANDBOX_WORKSPACE:-data/sandbox_workspace}"
 SANDBOX_MARKER_FILENAME=".hermes-collab-sandbox-workspace"
 
@@ -58,6 +58,35 @@ while [[ $# -gt 0 ]]; do
     *) echo "未知参数：$1" >&2; exit 2 ;;
   esac
 done
+
+# ---------- 交互式选择运行时长（仅在未通过参数/环境变量指定时）----------
+if [[ "$HOURS" == "$DEFAULT_HOURS" && -t 0 ]]; then
+  echo "选择沙盒运行时长："
+  echo "  1) 4 小时"
+  echo "  2) 8 小时"
+  echo "  直接回车 → 默认 ${DEFAULT_HOURS} 小时"
+  read -rp "请输入选项 [默认 ${DEFAULT_HOURS}h]: " __dur_choice
+  case "$__dur_choice" in
+    1) HOURS=4 ;;
+    2) HOURS=8 ;;
+    "") ;;  # keep default
+    *) echo "无效选项，使用默认 ${DEFAULT_HOURS} 小时" ;;
+  esac
+fi
+
+# ---------- 交互式选择真实模式（仅在未通过 --real 参数指定时）----------
+if [[ "$REAL" == "0" && -t 0 ]]; then
+  echo
+  echo "是否启用真实 Token 转发（调用真实 LLM API，消耗实际 token）？"
+  echo "  1) 是 — 启用真实模式（${REAL_LIMIT} 轮对话额度，用完自动结束）"
+  echo "  直接回车 → 否（演示模式，不消耗 token）"
+  read -rp "请输入选项 [默认否]: " __real_choice
+  case "$__real_choice" in
+    1) REAL=1; RESEED=0; echo "  ✓ 已启用真实模式，额度 ${REAL_LIMIT} 轮" ;;
+    "") ;;  # keep demo mode
+    *) echo "  无效选项，使用演示模式" ;;
+  esac
+fi
 
 # ---------- 路径定位 ----------
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
