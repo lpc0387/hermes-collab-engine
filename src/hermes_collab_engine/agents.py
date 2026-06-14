@@ -163,7 +163,7 @@ _register_builtin(AgentBackend(
     output_format_flags=["--output-format", "json"],
     supports_model_flag=True,
     model_flag="--model",
-    permission_flags=["--permission-mode", "acceptEdits"],
+    permission_flags=["--permission-mode", "auto"],
     allowed_tools_flag="--allowedTools",
     output_parser="claude_json",
     process_pattern="claude.*--output-format",
@@ -171,9 +171,7 @@ _register_builtin(AgentBackend(
     prompt_suffix="",
     default_allowed_tools=[
         "Read", "Edit", "Write", "MultiEdit",
-        "Bash(git diff*)", "Bash(git status*)", "Bash(git ls-files*)", "Bash(git clone*)",
-        "Bash(git add*)", "Bash(git commit*)", "Bash(git push*)",
-        "Bash(python3 -m unittest*)", "Bash(python3 -m py_compile*)", "Bash(bash -n*)",
+        "Bash(*)",
     ],
     capabilities=["file-edit", "git-ops", "test-run", "mcp-host", "search"],
 ))

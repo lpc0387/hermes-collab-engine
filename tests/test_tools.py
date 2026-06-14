@@ -139,7 +139,7 @@ class EngineToolInjectionTests(unittest.TestCase):
 
             tools = _extract_allowed_tools(mock_run.call_args.args[0])
             self.assertIn("Read", tools)
-            self.assertIn("Bash(git status*)", tools)
+            self.assertIn("Bash(*)", tools)
 
 
 class CLIToolTests(unittest.TestCase):
