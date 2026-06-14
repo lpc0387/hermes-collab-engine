@@ -134,7 +134,7 @@ class CheckpointPauseResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             engine = make_engine(tmp)
             nodes = [node("wbs-1", checkpoint=True), node("wbs-2", ["wbs-1"])]
-            engine.planner.decompose = lambda request: Plan(nodes=nodes)
+            engine.planner.decompose = lambda request, **kw: Plan(nodes=nodes)
             engine.store.set_setting("risk_policy", RiskPolicy(high="pause").to_dict())
             calls: list[str] = []
 

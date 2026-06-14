@@ -1,8 +1,8 @@
-# Hermes Collab Engine v5.0
+# Hermes Collab Engine v5.5
 
-[![Release v5.0.0](https://img.shields.io/badge/release-v5.0.0-blue)](CHANGELOG.md) [![Sandbox ready](https://img.shields.io/badge/sandbox-ready-success)](sandbox/README.md) [![License MIT](https://img.shields.io/badge/license-MIT-green)](#许可证) [![Security](https://img.shields.io/badge/security-policy-orange)](SECURITY.md)
+[![Release v5.5.0](https://img.shields.io/badge/release-v5.5.0-blue)](CHANGELOG.md) [![Sandbox ready](https://img.shields.io/badge/sandbox-ready-success)](sandbox/README.md) [![License MIT](https://img.shields.io/badge/license-MIT-green)](#许可证) [![Security](https://img.shields.io/badge/security-policy-orange)](SECURITY.md)
 
-Hermes Collab Engine v5.0 是面向 **Hermes 协同引擎** 的首个正式公开发布版 **AI multi-agent collaboration engine**：Leader 把需求拆成 WBS，Worker 并行执行，Claude Code / Hermes Agent / 自定义 Agent Backend 可接入同一条协作流水线。
+Hermes Collab Engine v5.5 是面向 **Hermes 协同引擎** 的首个正式公开发布版 **AI multi-agent collaboration engine**：Leader 把需求拆成 WBS，Worker 并行执行，Claude Code / Hermes Agent / 自定义 Agent Backend 可接入同一条协作流水线。
 
 它同时提供实时 **dashboard**、隔离 **sandbox**、Leader 反馈日记本、轻量 API 与一行安装部署，适合把复杂研发任务拆解、调度、审计并汇总成可读交付物。
 
@@ -53,6 +53,44 @@ hermes-collab run "分析当前项目结构" --cwd . --json
 | Leader 反馈日记本 | 任务完成后弹出像素本子，完整展示 Leader 聚合反馈，支持复制/下载 Markdown |
 | 一行 curl 部署 | 使用上方 `curl ... | bash` 即可安装，模板脚本再按需接入 Hermes |
 
+## v5.5 预览版新增
+
+> v5.5 是面向开发者的预览版，新增以下功能，欢迎试用反馈。
+
+### 统一注册表 (UnifiedRegistry)
+- Skill、Tool、MCP 统一管理，能力标签索引
+- Web UI 注册 → 自动持久化，重启不丢失
+- Leader 自动感知可用 skill/tool 并在 WBS 阶段预分配
+
+### Agent 管理
+- 内置 Agent（claude-code、hermes、codex、opencode）
+- Web UI 注册自定义 Agent，严格验证（name/command/capabilities）
+- 启用状态显示，能力标签
+
+### 会话链
+- 通过"接入上次会话"形成连续对话链
+- 按 resume 链分组展示多个 run 的状态与进度
+- 无连续对话时面板自动隐藏
+
+### Lessons 自学习系统
+- 引擎自动记录运行经验并去重提炼（run_id 归一化）
+- 只读节点风险检测修复（不再误触发 checkpoint）
+- checkpoint 状态原子持久化
+- lessons_learned 字段自动输出到 run 结果
+
+### Skill/MCP 工具注入
+- Leader 在 WBS 阶段为每个节点预分配 skill 和 MCP 工具
+- Web UI 支持文件导入注册（.md/.txt for skill，.json for MCP）
+- 工具白名单（permission whitelist）不受原生能力过滤影响
+
+### 沙盒一键启动
+```bash
+sandbox              # 默认 2 小时，端口 8876
+sandbox 4            # 运行 4 小时
+sandbox --port 8877  # 自定义端口
+```
+沙盒与生产完全隔离（独立 DB、工作区、端口），同步了全部 v5.5 Web UI 功能。
+
 ## 沙盒演示
 
 沙盒用于演示 dashboard、运行历史、Worker 状态、模型展示与 Leader 日记本。它使用 mock API 和脱敏演示数据，**不调用真实 worker、不写生产数据、不包含真实运行时数据**。
@@ -76,6 +114,15 @@ hermes-collab run "分析当前项目结构" --cwd . --json
 ```
 
 启动后访问：`http://127.0.0.1:8876/`。详见 [`sandbox/README.md`](sandbox/README.md)。
+
+v5.5 新增 `sandbox` 一键启动命令，与 `opc` 同级：
+
+```bash
+sandbox              # 默认 2 小时，端口 8876
+sandbox 4            # 运行 4 小时
+sandbox --port 8877  # 自定义端口
+sandbox --real       # 启用真实 worker 执行
+```
 
 ## 核心概念
 
@@ -181,6 +228,13 @@ HERMES_COLLAB_MODEL=glm-5.1           # 全局模型
 HERMES_COLLAB_LEADER_MODEL=glm-5.1    # Leader 模型
 HERMES_COLLAB_WORKER_MODEL=kimi-k2.6  # Worker 模型
 ANTHROPIC_MODEL=glm-5.1               # 回退
+
+# 可选：Worker git HTTPS 凭据。由运行环境/secret manager 注入，不写入仓库。
+HERMES_COLLAB_WORKER_GIT_TOKEN=ghp_xxx
+HERMES_COLLAB_WORKER_GIT_USERNAME=x-access-token
+HERMES_COLLAB_WORKER_GIT_ALLOWED_HOSTS=github.com
+# 或提供外部 helper（例如 !/path/to/helper），优先于内置 env-backed helper。
+HERMES_COLLAB_WORKER_GIT_CREDENTIAL_HELPER='!/path/to/git-credential-helper'
 ```
 
 ## 持久化与安全边界
@@ -190,7 +244,8 @@ SQLite 文件（默认 `data/collab.sqlite3`）存储 runs、wbs_nodes、workers
 - Worker 在独立子进程执行，受 `allowed_tools` 白名单约束。
 - MCP 工具默认只读（`mcp-readonly` profile）。
 - 沙盒使用独立演示库与 workspace，可通过 TTL 清理。
-- `git push` 受 `git-write` tool profile 限制，仅 implementation 节点可用。
+- `git push` / `git clone` 受 `git-write` tool profile 限制，仅 implementation 节点在任务明确需要 git 写入/克隆时可用。
+- Worker git 凭据通过 `HERMES_COLLAB_<ROLE>_GIT_TOKEN` 派生到子进程环境，并用 Git 的 `GIT_CONFIG_*` 注入内存 credential helper；helper 脚本只引用环境变量，不把 token 明文写入仓库或 git config 文件。也可用 `HERMES_COLLAB_<ROLE>_GIT_CREDENTIAL_HELPER` 指向外部 helper。
 
 ## Agent Backend
 
@@ -201,6 +256,8 @@ SQLite 文件（默认 `data/collab.sqlite3`）存储 runs、wbs_nodes、workers
 | opencode | `opencode` | text |
 
 自定义 Backend：实现 `AgentBackend` 接口（`name`, `build_command`, `parse_output`, `default_allowed_tools`）并注册。
+
+v5.5 新增 Hermes Agent 内置注册，支持 planning/orchestration/delegation 等能力标签。
 
 ## 开发
 

@@ -17,7 +17,7 @@ class InterruptCleanupTest(unittest.TestCase):
                 WBSNode("WBS-02", "second", "second task", "general", 1, [], True, "second result"),
             ]
             engine.planner.assess = lambda request: ComplexityScore(1, 1, 1, 1, 1, 1, "wbs")
-            engine.planner.decompose = lambda request: nodes
+            engine.planner.decompose = lambda request, **kw: nodes
 
             def fake_run_worker(run_id, node, timeout, model_override=None):
                 worker_id = f"worker_{run_id}_{node.id}_{node.attempt}"

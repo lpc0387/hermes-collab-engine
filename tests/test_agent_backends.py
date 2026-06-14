@@ -3,11 +3,17 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
+import time
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from src.hermes_collab_engine.agents import (
     AgentBackend,
+    backends_for_capability,
+    delete_backend,
     get_backend,
     list_backends,
     detect_available_backends,
@@ -139,6 +145,161 @@ class AgentRegistryTests(unittest.TestCase):
         b = get_backend("test-agent")
         self.assertEqual(b.display_name, "Test Agent")
 
+    def test_delete_backend(self):
+        custom = AgentBackend(
+            name="del-me",
+            display_name="Delete Me",
+            command=["echo"],
+            prompt_flag="",
+            output_format_flags=[],
+            supports_model_flag=False,
+            model_flag="",
+            permission_flags=None,
+            allowed_tools_flag=None,
+            output_parser="raw_text",
+            process_pattern="echo",
+            prompt_prefix="",
+            prompt_suffix="",
+            default_allowed_tools=[],
+        )
+        register_backend(custom)
+        self.assertTrue(delete_backend("del-me"))
+        with self.assertRaises(KeyError):
+            get_backend("del-me")
+
+    def test_delete_nonexistent_returns_false(self):
+        self.assertFalse(delete_backend("nonexistent-agent-xyz"))
+
+    def test_agent_backend_has_enabled_field(self):
+        b = get_backend("claude-code")
+        self.assertTrue(b.enabled)
+
+    def test_agent_backend_enabled_in_to_dict(self):
+        b = get_backend("claude-code")
+        d = b.to_dict()
+        self.assertIn("enabled", d)
+        self.assertTrue(d["enabled"])
+
+
+class AgentCapabilitiesTests(unittest.TestCase):
+    def test_builtin_claude_code_has_capabilities(self):
+        b = get_backend("claude-code")
+        self.assertIsInstance(b.capabilities, list)
+        self.assertIn("file-edit", b.capabilities)
+        self.assertIn("git-ops", b.capabilities)
+        self.assertIn("test-run", b.capabilities)
+
+    def test_builtin_codex_has_capabilities(self):
+        b = get_backend("codex")
+        self.assertIsInstance(b.capabilities, list)
+        self.assertIn("file-edit", b.capabilities)
+
+    def test_builtin_opencode_has_capabilities(self):
+        b = get_backend("opencode")
+        self.assertIsInstance(b.capabilities, list)
+        self.assertIn("file-edit", b.capabilities)
+
+    def test_backends_for_capability(self):
+        results = backends_for_capability("file-edit")
+        names = {b.name for b in results}
+        self.assertIn("claude-code", names)
+        self.assertIn("codex", names)
+        self.assertIn("opencode", names)
+
+    def test_backends_for_capability_mcp_host(self):
+        results = backends_for_capability("mcp-host")
+        names = {b.name for b in results}
+        self.assertIn("claude-code", names)
+        self.assertNotIn("codex", names)
+
+    def test_backends_for_capability_unknown(self):
+        results = backends_for_capability("nonexistent-cap-xyz")
+        self.assertEqual(len(results), 0)
+
+    def test_custom_backend_with_capabilities(self):
+        custom = AgentBackend(
+            name="cap-test",
+            display_name="Cap Test",
+            command=["echo"],
+            prompt_flag="",
+            output_format_flags=[],
+            supports_model_flag=False,
+            model_flag="",
+            permission_flags=None,
+            allowed_tools_flag=None,
+            output_parser="raw_text",
+            process_pattern="echo",
+            prompt_prefix="",
+            prompt_suffix="",
+            default_allowed_tools=[],
+            capabilities=["browser", "file-edit"],
+        )
+        register_backend(custom)
+        b = get_backend("cap-test")
+        self.assertEqual(b.capabilities, ["browser", "file-edit"])
+        delete_backend("cap-test")
+
+    def test_custom_backend_default_empty_capabilities(self):
+        custom = AgentBackend(
+            name="cap-default-test",
+            display_name="Cap Default",
+            command=["echo"],
+            prompt_flag="",
+            output_format_flags=[],
+            supports_model_flag=False,
+            model_flag="",
+            permission_flags=None,
+            allowed_tools_flag=None,
+            output_parser="raw_text",
+            process_pattern="echo",
+            prompt_prefix="",
+            prompt_suffix="",
+            default_allowed_tools=[],
+        )
+        register_backend(custom)
+        b = get_backend("cap-default-test")
+        self.assertEqual(b.capabilities, [])
+        delete_backend("cap-default-test")
+
+    def test_capabilities_in_to_dict(self):
+        b = get_backend("claude-code")
+        d = b.to_dict()
+        self.assertIn("capabilities", d)
+        self.assertIsInstance(d["capabilities"], list)
+        self.assertIn("file-edit", d["capabilities"])
+
+    def test_api_agents_returns_capabilities(self):
+        """GET /api/agents should include capabilities in each agent."""
+        import urllib.request
+        import socket
+        import tempfile
+        import threading
+        from src.hermes_collab_engine.server import DashboardServer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "collab.sqlite3")
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+            server = DashboardServer("127.0.0.1", port, db_path, tmp)
+            t = threading.Thread(target=server.serve, daemon=True)
+            t.start()
+            base = f"http://127.0.0.1:{port}"
+            # wait for server
+            for _ in range(50):
+                try:
+                    urllib.request.urlopen(base + "/api/overview", timeout=1).read()
+                    break
+                except Exception:
+                    import time as _t
+                    _t.sleep(0.05)
+            resp = urllib.request.urlopen(base + "/api/agents", timeout=3)
+            agents = json.loads(resp.read().decode())
+            claude = next(a for a in agents if a["name"] == "claude-code")
+            self.assertIn("capabilities", claude)
+            self.assertIn("file-edit", claude["capabilities"])
+
+
 
 class EngineAgentIntegrationTests(unittest.TestCase):
     def test_engine_default_agent_is_claude_code(self):
@@ -162,7 +323,7 @@ class EngineAgentIntegrationTests(unittest.TestCase):
             # Mock planner to avoid actually running claude
             from src.hermes_collab_engine.models import ComplexityScore, Plan, WBSNode, WorkerResult
             engine.planner.assess = lambda r: ComplexityScore(1, 1, 1, 1, 1, 2, "wbs")
-            engine.planner.decompose = lambda r: Plan(nodes=[
+            engine.planner.decompose = lambda r, **kw: Plan(nodes=[
                 WBSNode("wbs-1", "Test", "Do test", "verification", 2, [], True, "Result")
             ])
             engine._run_worker = lambda rid, n, t, model_override=None: WorkerResult(
@@ -178,7 +339,7 @@ class EngineAgentIntegrationTests(unittest.TestCase):
             engine = CollabEngine(Path(tmp) / "db.sqlite3", tmp, agent="claude-code")
             from src.hermes_collab_engine.models import ComplexityScore, Plan, WBSNode, WorkerResult
             engine.planner.assess = lambda r: ComplexityScore(1, 1, 1, 1, 1, 2, "wbs")
-            engine.planner.decompose = lambda r: Plan(nodes=[
+            engine.planner.decompose = lambda r, **kw: Plan(nodes=[
                 WBSNode("wbs-1", "Test", "Do test", "verification", 2, [], True, "Result")
             ])
             engine._run_worker = lambda rid, n, t, model_override=None: WorkerResult(
@@ -193,6 +354,185 @@ class EngineAgentIntegrationTests(unittest.TestCase):
             else:
                 # If mock bypasses logging, just verify the engine has the right backend
                 self.assertEqual(engine.agent_backend.name, "claude-code")
+
+
+class AgentAPICRUDTests(unittest.TestCase):
+    """Test agent CRUD via HTTP API."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / "collab.sqlite3")
+        self.cwd = self.tmp.name
+        self.port = self._free_port()
+        from src.hermes_collab_engine.server import DashboardServer
+        self.server = DashboardServer("127.0.0.1", self.port, self.db_path, self.cwd)
+        self.thread = threading.Thread(target=self.server.serve, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.port}"
+        self._wait_ready()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _free_port():
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def _wait_ready(self):
+        import time as _time
+        last = None
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(self.base + "/api/overview", timeout=1).read()
+                return
+            except Exception as exc:
+                last = exc
+                _time.sleep(0.05)
+        raise AssertionError(f"server did not become ready: {last}")
+
+    def _post_json(self, path, payload):
+        import urllib.request, urllib.error
+        req = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(payload).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        return json.loads(urllib.request.urlopen(req, timeout=3).read().decode())
+
+    def _get_json(self, path):
+        import urllib.request
+        return json.loads(urllib.request.urlopen(self.base + path, timeout=3).read().decode())
+
+    def _delete(self, path):
+        import urllib.request, urllib.error
+        req = urllib.request.Request(self.base + path, method="DELETE")
+        return json.loads(urllib.request.urlopen(req, timeout=3).read().decode())
+
+    def test_post_agents_registers_backend(self):
+        resp = self._post_json("/api/agents", {
+            "name": "api-test-agent",
+            "display_name": "API Test Agent",
+            "command": ["echo", "hello"],
+            "output_parser": "raw_text",
+            "capabilities": ["file-edit"],
+        })
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["name"], "api-test-agent")
+        # Verify it shows up in GET /api/agents
+        agents = self._get_json("/api/agents")
+        names = [a["name"] for a in agents]
+        self.assertIn("api-test-agent", names)
+        delete_backend("api-test-agent")
+
+    def test_post_agents_requires_name(self):
+        import urllib.request, urllib.error
+        req = urllib.request.Request(
+            self.base + "/api/agents",
+            data=json.dumps({}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=3)
+            self.fail("expected HTTPError 400")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+
+    def test_post_agents_validates_name_pattern(self):
+        """POST /api/agents with invalid name should return 400."""
+        import urllib.request, urllib.error
+        req = urllib.request.Request(
+            self.base + "/api/agents",
+            data=json.dumps({"name": "INVALID NAME!", "command": ["echo"], "capabilities": ["test"]}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=3)
+            self.fail("expected HTTPError 400")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+
+    def test_post_agents_validates_command_required(self):
+        """POST /api/agents with empty command should return 400."""
+        import urllib.request, urllib.error
+        req = urllib.request.Request(
+            self.base + "/api/agents",
+            data=json.dumps({"name": "test-cmd", "command": [], "capabilities": ["test"]}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=3)
+            self.fail("expected HTTPError 400")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+
+    def test_post_agents_validates_capabilities(self):
+        """POST /api/agents with empty capabilities should return 400."""
+        import urllib.request, urllib.error
+        req = urllib.request.Request(
+            self.base + "/api/agents",
+            data=json.dumps({"name": "test-caps", "command": ["echo"], "capabilities": []}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=3)
+            self.fail("expected HTTPError 400")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+
+    def test_post_agents_validates_output_parser(self):
+        """POST /api/agents with unknown parser should return 400."""
+        import urllib.request, urllib.error
+        req = urllib.request.Request(
+            self.base + "/api/agents",
+            data=json.dumps({"name": "test-parser", "command": ["echo"], "capabilities": ["test"], "output_parser": "unknown_parser"}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=3)
+            self.fail("expected HTTPError 400")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+
+    def test_post_agents_returns_409_on_duplicate(self):
+        """POST /api/agents with existing name should return 409."""
+        import urllib.request, urllib.error
+        # First registration succeeds
+        resp = self._post_json("/api/agents", {
+            "name": "dup-test-agent",
+            "command": ["echo"],
+            "capabilities": ["test"],
+        })
+        self.assertTrue(resp["ok"])
+        # Second registration with same name returns 409
+        req = urllib.request.Request(
+            self.base + "/api/agents",
+            data=json.dumps({"name": "dup-test-agent", "command": ["echo"], "capabilities": ["test"]}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=3)
+            self.fail("expected HTTPError 409")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 409)
+        # cleanup
+        delete_backend("dup-test-agent")
+
+    def test_api_agents_returns_enabled_field(self):
+        """GET /api/agents should include enabled field."""
+        agents = self._get_json("/api/agents")
+        claude = next(a for a in agents if a["name"] == "claude-code")
+        self.assertIn("enabled", claude)
+        self.assertTrue(claude["enabled"])
 
 
 class CLIAgentTests(unittest.TestCase):

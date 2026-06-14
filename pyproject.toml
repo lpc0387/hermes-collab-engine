@@ -1,6 +1,6 @@
 [project]
 name = "hermes-collab-engine"
-version = "5.0.0"
+version = "5.5.0"
 description = "Standalone collaboration engine for official Hermes Agent and Claude Code workers"
 readme = "README.md"
 requires-python = ">=3.11"

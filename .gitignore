@@ -33,3 +33,6 @@ uv.lock
 # Working backups
 *.bak
 *.bak.*
+
+# Task description files (collab engine temporary)
+task-*.md

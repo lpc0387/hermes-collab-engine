@@ -485,6 +485,93 @@ def get_config_manual():
 
 # ── Main ───────────────────────────────────────────────────────────────
 
+# ── Agent config registry ──────────────────────────────────────────────
+# Each agent registers how its config files should be synced.
+# To add a new agent, append an entry to AGENT_CONFIG_REGISTRY.
+# Format: (name, config_path_builder, sync_function)
+#   config_path_builder(leader, worker) -> Path | None
+#   sync_function(path, leader, worker) -> None (writes config)
+
+def _sync_hermes_env(path: Path, leader: dict, worker: dict) -> None:
+    """Sync ~/.hermes/.env — key=value format."""
+    import re as _re
+    if path.exists():
+        lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
+    else:
+        lines = ['# Hermes Agent secrets\n']
+    updates = {'ANTHROPIC_API_KEY': leader['api_key'], 'ANTHROPIC_BASE_URL': leader['base_url']}
+    for key, val in updates.items():
+        pattern = _re.compile(rf'^{key}=.*$')
+        found = False
+        for i, line in enumerate(lines):
+            if pattern.match(line.strip()):
+                lines[i] = f'{key}={val}\n'
+                found = True
+                break
+        if not found:
+            lines.append(f'{key}={val}\n')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(''.join(lines), encoding='utf-8')
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    print(f'  ✓ 已同步 → {path}')
+
+
+def _sync_claude_settings(path: Path, leader: dict, worker: dict) -> None:
+    """Sync ~/.claude/settings.json — JSON format with env block."""
+    if path.exists():
+        try:
+            settings = load_json_lenient(path)
+        except Exception:
+            settings = {}
+    else:
+        settings = {}
+    env_block = settings.setdefault('env', {})
+    env_block['ANTHROPIC_AUTH_TOKEN'] = leader['api_key']
+    env_block['ANTHROPIC_API_KEY'] = leader['api_key']
+    env_block['ANTHROPIC_BASE_URL'] = leader['base_url']
+    if leader.get('model'):
+        env_block['ANTHROPIC_DEFAULT_OPUS_MODEL'] = leader['model']
+        env_block['ANTHROPIC_DEFAULT_OPUS_MODEL_NAME'] = leader['model']
+    if worker.get('model'):
+        env_block['ANTHROPIC_DEFAULT_SONNET_MODEL'] = worker['model']
+        env_block['ANTHROPIC_DEFAULT_SONNET_MODEL_NAME'] = worker['model']
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    print(f'  ✓ 已同步 → {path}')
+
+
+# Agent config registry: (name, path_builder, sync_fn)
+# path_builder receives (leader, worker) and returns the config file Path or None.
+# To add a new agent, append a tuple here.
+AGENT_CONFIG_REGISTRY = [
+    ('hermes', lambda l, w: HERMES_DIR / '.env', _sync_hermes_env),
+    ('claude', lambda l, w: CLAUDE_DIR / 'settings.json', _sync_claude_settings),
+]
+
+
+def sync_agent_configs(leader: dict, worker: dict) -> None:
+    """Write leader config back to all registered agent config files.
+
+    Iterates AGENT_CONFIG_REGISTRY — each agent defines its own config path
+    and sync function. To add a new agent, append to AGENT_CONFIG_REGISTRY.
+    """
+    for name, path_builder, sync_fn in AGENT_CONFIG_REGISTRY:
+        config_path = path_builder(leader, worker)
+        if config_path is None:
+            continue
+        try:
+            sync_fn(config_path, leader, worker)
+        except Exception as e:
+            print(f'  ⚠ {name} 配置同步失败: {e}')
+
+
 def stop_existing_server():
     subprocess.run(['pkill', '-f', 'src.hermes_collab_engine.cli server'],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -543,6 +630,12 @@ def main():
         os.chmod(RUNTIME_CONFIG_PATH, 0o600)  # contains api_keys
     except OSError:
         pass
+
+    # ── Sync agent config files ────────────────────────────────────────
+    # Write leader values back to ~/.hermes/.env and ~/.claude/settings.json
+    # so that agent tools (Hermes CLI, Claude Code) pick up the new config
+    # without needing opc as an intermediary.
+    sync_agent_configs(leader, worker)
 
     # Build subprocess env. Leader values drive the env vars (Hermes CLI inherits
     # these); worker values are passed via HERMES_COLLAB_WORKER_* and CLI flags so

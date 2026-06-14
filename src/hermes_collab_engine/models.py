@@ -34,6 +34,10 @@ class WBSNode:
     attempt: int = 1
     brief: str = ""
     estimated_duration: int | None = None
+    write_targets: list[str] = field(default_factory=list)
+    fingerprint: str = ""
+    skills_json: str = ""
+    tools_json: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "WBSNode":
@@ -44,6 +48,10 @@ class WBSNode:
             "attempt": 1,
             "brief": "",
             "estimated_duration": None,
+            "write_targets": [],
+            "fingerprint": "",
+            "skills_json": "",
+            "tools_json": "",
         }
         return cls(**{**defaults, **data})
 

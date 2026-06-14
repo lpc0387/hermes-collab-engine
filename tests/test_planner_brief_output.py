@@ -47,6 +47,77 @@ class PlannerBriefOutputTests(unittest.TestCase):
         self.assertEqual(node.id, "wbs-1")
         self.assertEqual(node.brief, "touch src only")
         self.assertEqual(node.estimated_duration, 450)
+        self.assertEqual(node.write_targets, [])
+
+    def test_decompose_accepts_write_targets(self) -> None:
+        planner = Planner(cwd=Path("/repo"))
+        payload = {
+            "nodes": [
+                {
+                    "id": "wbs-1",
+                    "title": "Implement feature",
+                    "description": "Change code",
+                    "capability": "implementation",
+                    "complexity": 4,
+                    "dependencies": [],
+                    "parallelizable": True,
+                    "deliverable": "Patch",
+                    "write_targets": ["src/app.py", " docs "],
+                }
+            ],
+        }
+
+        with patch.object(Planner, "_claude_json", return_value=payload):
+            plan = planner.decompose("add feature")
+
+        self.assertEqual(plan.nodes[0].write_targets, ["src/app.py", "docs"])
+
+    def test_decompose_deduplicates_nodes_and_rewrites_dependencies(self) -> None:
+        planner = Planner(cwd=Path("/repo"))
+        payload = {
+            "nodes": [
+                {
+                    "id": "wbs-a",
+                    "title": "Update scheduler dedup",
+                    "description": "Update scheduler dedup logic",
+                    "capability": "implementation",
+                    "complexity": 4,
+                    "dependencies": [],
+                    "parallelizable": True,
+                    "deliverable": "Patch",
+                    "write_targets": ["src/hermes_collab_engine/engine.py"],
+                },
+                {
+                    "id": "wbs-b",
+                    "title": "Update scheduler dedup",
+                    "description": "Update scheduler dedup logic",
+                    "capability": "implementation",
+                    "complexity": 4,
+                    "dependencies": [],
+                    "parallelizable": True,
+                    "deliverable": "Patch",
+                    "write_targets": ["tests/test_stream_scheduler.py"],
+                },
+                {
+                    "id": "wbs-c",
+                    "title": "Verify scheduler",
+                    "description": "Verify scheduler behavior",
+                    "capability": "verification",
+                    "complexity": 3,
+                    "dependencies": ["wbs-b"],
+                    "parallelizable": True,
+                    "deliverable": "Test report",
+                },
+            ],
+        }
+
+        with patch.object(Planner, "_claude_json", return_value=payload):
+            plan = planner.decompose("dedup scheduler")
+
+        self.assertEqual([node.id for node in plan.nodes], ["wbs-a", "wbs-c"])
+        self.assertEqual(plan.nodes[0].write_targets, ["src/hermes_collab_engine/engine.py", "tests/test_stream_scheduler.py"])
+        self.assertEqual(plan.nodes[1].dependencies, ["wbs-a"])
+        self.assertTrue(plan.nodes[0].fingerprint)
 
     def test_decompose_keeps_backward_compatible_list_payload(self) -> None:
         planner = Planner(cwd=Path("/repo"))
@@ -76,7 +147,7 @@ class PlannerBriefOutputTests(unittest.TestCase):
         planner = Planner(cwd=Path("/repo"))
 
         with patch.object(Planner, "_claude_json", side_effect=RuntimeError("boom")):
-            plan = planner.decompose("small change")
+            plan = planner.fallback_wbs("small change", score=type("Score", (), {"routing": "single", "overall": 4})())
 
         self.assertIsInstance(plan, Plan)
         self.assertTrue(plan.shared_brief)

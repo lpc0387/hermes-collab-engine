@@ -91,6 +91,8 @@ class EngineSkillInjectionTests(unittest.TestCase):
                 stderr="",
             )
             with patch("src.hermes_collab_engine.engine.subprocess.run", return_value=completed) as mock_run:
+                # Simulate Leader pre-allocating skills to the node
+                node.skills_json = json.dumps(["implementation-focus", "test-verify"])
                 result = engine._run_worker("run_test", node, timeout=30)
 
             self.assertTrue(result.ok)
@@ -98,14 +100,10 @@ class EngineSkillInjectionTests(unittest.TestCase):
             self.assertIn("Relevant skills injected by Hermes", prompt)
             self.assertIn("Focused Implementation", prompt)
             self.assertIn("Test & Verification", prompt)
-
-            log = engine.store._one(
-                "SELECT data_json FROM logs WHERE run_id=? AND node_id=? AND message='worker skills selected'",
-                ("run_test", "wbs-impl"),
-            )
-            self.assertIsNotNone(log)
-            data = json.loads(log["data_json"])
-            self.assertIn("implementation-focus", data["skills"])
+            # Skills are now Leader-allocated; verify via node.skills_json
+            self.assertIsNotNone(node.skills_json)
+            skill_names = json.loads(node.skills_json)
+            self.assertIn("implementation-focus", skill_names)
 
     def test_run_worker_omits_skills_when_registry_selects_none(self):
         with tempfile.TemporaryDirectory() as tmp:

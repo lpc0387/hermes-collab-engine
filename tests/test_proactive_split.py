@@ -45,6 +45,17 @@ class ProactiveSplitTests(unittest.TestCase):
         self.assertFalse(self.engine._should_split_proactively(make_node(600), timeout=900, max_retries=0, split_count=2))
         self.assertFalse(self.engine._should_split_proactively(make_node(600), timeout=900, max_retries=1, split_count=1))
 
+    def test_runtime_duplicate_fingerprint_skips_second_worker(self) -> None:
+        first = WBSNode("wbs-1", "Implement dedup", "Implement dedup", "implementation", 5, [], True, "done")
+        second = WBSNode("wbs-2", "Implement dedup", "Implement dedup", "implementation", 5, [], True, "done")
+
+        claimed = self.engine._claim_fingerprint(first)
+
+        self.assertEqual(self.engine._duplicate_running_node(second), "wbs-1")
+        self.assertEqual(self.engine._node_fingerprint(second), claimed)
+        self.engine._release_fingerprint("wbs-1")
+        self.assertIsNone(self.engine._duplicate_running_node(second))
+
     def test_split_node_creates_focused_shards(self) -> None:
         shards = self.engine._split_node(make_node(600), 5)
 
@@ -72,7 +83,7 @@ class ProactiveSplitTests(unittest.TestCase):
     def test_over_estimate_logs_warning_and_runs_shards(self) -> None:
         node = make_node(600)
         self.engine.planner.assess = lambda request: ComplexityScore(5, 5, 5, 5, 5, 7, "wbs")
-        self.engine.planner.decompose = lambda request: Plan(nodes=[node])
+        self.engine.planner.decompose = lambda request, **kw: Plan(nodes=[node])
         calls: list[str] = []
 
         def fake_run_worker(run_id, current, timeout, model_override=None):

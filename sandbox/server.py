@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
@@ -127,16 +127,21 @@ RUN_DETAILS: dict[str, dict] = {
     },
 }
 
-SKILLS = [
-    {"name": "implementation-focus", "display_name": "Focused Implementation", "priority": 100, "description": "Make the smallest useful code change for the sandbox demo."},
-    {"name": "test-verify", "display_name": "Test & Verification", "priority": 90, "description": "Run narrow checks and report exact results."},
-    {"name": "debug-root-cause", "display_name": "Debug Root Cause", "priority": 70, "description": "Inspect the failing path before changing code."},
-]
+def skills_payload(node_type: str = "", task: str = "") -> list[dict]:
+    from hermes_collab_engine.skills import get_default_registry
 
-TOOLS = [
-    {"name": "file-edit", "display_name": "File Read/Edit", "priority": 100, "description": "Read and edit repository files for sandbox implementation.", "allowed_tools": ["Read", "Edit", "Write"]},
-    {"name": "python-tests", "display_name": "Python Test Runner", "priority": 90, "description": "Run local Python syntax checks for sandbox entrypoints.", "allowed_tools": ["python3 -m py_compile"]},
-]
+    registry = get_default_registry()
+    skills = registry.select_for_node(node_type, task) if node_type else registry.list_all()
+    return [skill.to_dict() for skill in skills]
+
+
+
+def tools_payload(node_type: str = "", task: str = "") -> list[dict]:
+    from hermes_collab_engine.tools import get_default_tool_registry
+
+    registry = get_default_tool_registry()
+    profiles = registry.select_for_node(node_type, task) if node_type else registry.list_all()
+    return [profile.to_dict() for profile in profiles]
 
 
 def normalize_base_path(value: str | None) -> str:
@@ -220,10 +225,132 @@ def overview() -> dict:
     return {"runs": len(RUNS), "running": running, "workers_running": workers, "lessons": LESSON_COUNT, "sandbox": True, "data_source": DATA_SOURCE}
 
 
+
+def compact_title(text: str, limit: int = 80) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text or "沙盒任务"
+    return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+
+def config_payload() -> dict:
+    env_model = os.environ.get("HERMES_SANDBOX_MODEL") or os.environ.get("HERMES_COLLAB_MODEL") or os.environ.get("ANTHROPIC_MODEL")
+    leader_model = os.environ.get("HERMES_SANDBOX_LEADER_MODEL") or os.environ.get("HERMES_COLLAB_LEADER_MODEL") or env_model
+    worker_model = os.environ.get("HERMES_SANDBOX_WORKER_MODEL") or os.environ.get("HERMES_COLLAB_WORKER_MODEL") or env_model
+    return {
+        "model": env_model,
+        "leader_model": leader_model,
+        "worker_model": worker_model,
+        "effective_leader_model": leader_model,
+        "effective_worker_model": worker_model,
+        "model_overrides_readonly": True,
+        "agent": os.environ.get("HERMES_SANDBOX_AGENT", "claude-code"),
+        "sandbox": True,
+        "real_execution": REAL_EXECUTION,
+    }
+
+
+
+def _token_totals(logs: list[dict]) -> dict:
+    totals = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+    for log in logs:
+        data = log.get("data") or _loads(log.get("data_json"), {})
+        usage = data.get("usage") if isinstance(data, dict) and isinstance(data.get("usage"), dict) else data
+        if not isinstance(usage, dict):
+            continue
+        for key in totals:
+            try:
+                totals[key] += int(usage.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                pass
+    return totals
+
+
+
+def task_set_for_run(run_id: str) -> dict:
+    detail = RUN_DETAILS.get(run_id, {})
+    nodes = detail.get("nodes", [])
+    logs = detail.get("logs", [])
+    counts = {"total": 0, "pending": 0, "planning": 0, "running": 0, "completed": 0, "failed": 0, "skipped": 0}
+    for node in nodes:
+        status = str(node.get("status") or "pending")
+        counts["total"] += 1
+        counts[status] = counts.get(status, 0) + 1
+    kills = []
+    for log in logs:
+        message = str(log.get("message") or "")
+        if "duplicate" in message.lower() or "kill" in message.lower() or "killed" in message.lower():
+            kills.append({"created_at": log.get("timestamp") or log.get("created_at"), "node_id": log.get("node_id"), "level": log.get("level"), "message": message, "data": log.get("data") or {}})
+    return {
+        "counts": counts,
+        "workers": {"total": len(nodes), "running": sum(1 for node in nodes if node.get("status") == "running")},
+        "tokens": {**_token_totals(logs), "source": "sandbox event logs"},
+        "dedup_kills": kills[:20],
+        "sandbox": True,
+    }
+
+
+
+def task_sets(limit: int = 20) -> list[dict]:
+    return [{"run": run, **task_set_for_run(run["id"])} for run in RUNS[:limit]]
+
+
+
+def resume_context(run_id: str | None = None, *, node_limit: int = 4, log_limit: int = 8) -> dict | None:
+    if not RUNS:
+        return None
+    run = next((item for item in RUNS if item.get("id") == run_id), RUNS[0] if run_id is None else None)
+    if not run:
+        return None
+    detail = RUN_DETAILS.get(run["id"], {})
+    nodes = []
+    for node in detail.get("nodes", [])[-node_limit:]:
+        result = str(node.get("result") or node.get("brief") or "")
+        nodes.append({
+            "id": node.get("id"),
+            "title": node.get("title"),
+            "status": node.get("status"),
+            "result_excerpt": result[:800],
+        })
+    logs = detail.get("logs", [])[-log_limit:]
+    summary_lines = [
+        f"Previous sandbox run {run['id']} ({run.get('status', 'unknown')}): {run.get('title', '')}",
+    ]
+    for node in nodes:
+        summary_lines.append(f"- {node['id']} {node['status']}: {node['title']} — {node['result_excerpt'][:300]}")
+    summary = "\n".join(summary_lines)
+    return {
+        "run": run,
+        "summary": summary,
+        "recent_interactions": logs,
+        "estimated_tokens": max(1, (len(summary) + sum(len(str(item)) for item in logs)) // 4),
+        "limits": {"nodes": node_limit, "logs": log_limit, "result_excerpt_chars": 800},
+        "sandbox": True,
+    }
+
+
+
+def resume_prompt(request: str, run_id: str | None = None) -> tuple[str, dict | None]:
+    context = resume_context(run_id)
+    if not context:
+        return request, None
+    interactions = "\n".join(
+        f"- {item.get('timestamp') or item.get('created_at', '')} {item.get('level', '')} {item.get('node_id') or ''}: {item.get('message', '')}"
+        for item in context["recent_interactions"][-8:]
+    )
+    prompt = (
+        "Sandbox session resume context (bounded summary only; production context is not loaded):\n"
+        f"{context['summary']}\n\nRecent interactions:\n{interactions}\n\n"
+        f"New user request:\n{request}"
+    )
+    return prompt, context
+
+
 def add_demo_run(request: str) -> dict:
     run_id = f"sandbox-demo-{len(RUNS) + 1:03d}"
     created = now_iso()
-    run = {"id": run_id, "title": request[:80], "status": "running", "created_at": created}
+    run = {"id": run_id, "title": compact_title(request), "status": "running", "created_at": created}
     detail = {
         **run,
         "nodes": [
@@ -537,15 +664,47 @@ class SandboxHandler(BaseHTTPRequestHandler):
             self._json(overview())
         elif path == "/api/runs":
             self._json(RUNS)
+        elif path == "/api/resume-context":
+            query = parse_qs(urlparse(self.path).query)
+            run_id = (query.get("run_id") or [None])[0]
+            context = resume_context(run_id)
+            self._json(context or {"error": "no previous sandbox run"}, 200 if context else 404)
+        elif path == "/api/task-sets":
+            self._json(task_sets())
         elif path.startswith("/api/runs/"):
             run_id = path.rsplit("/", 1)[-1]
-            self._json(RUN_DETAILS.get(run_id, {"error": "not found"}), 200 if run_id in RUN_DETAILS else 404)
+            detail = RUN_DETAILS.get(run_id)
+            if detail:
+                self._json({**detail, "task_set": task_set_for_run(run_id)})
+            else:
+                self._json({"error": "not found"}, 404)
         elif path == "/api/logs":
             self._json(RUN_DETAILS[RUNS[0]["id"]]["logs"] if RUNS else [])
+        elif path == "/api/config":
+            self._json(config_payload())
         elif path == "/api/skills":
-            self._json(SKILLS)
+            query = parse_qs(urlparse(self.path).query)
+            node_type = (query.get("node_type") or [""])[0]
+            task = (query.get("task") or [""])[0]
+            self._json(skills_payload(node_type, task))
         elif path == "/api/tools":
-            self._json(TOOLS)
+            query = parse_qs(urlparse(self.path).query)
+            node_type = (query.get("node_type") or [""])[0]
+            task = (query.get("task") or [""])[0]
+            self._json(tools_payload(node_type, task))
+        elif path == "/api/session-chains":
+            self._json([])
+        elif path == "/api/registry":
+            from hermes_collab_engine.registry import get_unified_registry
+            registry = get_unified_registry()
+            entries = registry.list_all()
+            skills = [e.to_dict() for e in entries if e.__class__.__name__ == "SkillEntry"]
+            tools = [e.to_dict() for e in entries if e.__class__.__name__ == "ToolEntry"]
+            mcp = [e.to_dict() for e in entries if e.__class__.__name__ == "MCPEntry"]
+            self._json({"skills": skills, "tools": tools, "mcp": mcp, "total": len(entries)})
+        elif path == "/api/agents":
+            from hermes_collab_engine.agents import detect_available_backends
+            self._json([b.to_dict() for b in detect_available_backends()])
         elif path == "/api/sandbox/config":
             self._json(SANDBOX_CONFIG)
         elif path == "/api/events":
@@ -581,10 +740,34 @@ class SandboxHandler(BaseHTTPRequestHandler):
             request = str(data.get("request") or "").strip()
             if not request:
                 return self._json({"error": "request is required"}, 400)
+            if data.get("resume"):
+                request, context = resume_prompt(request, data.get("resume_run_id"))
+            else:
+                context = None
             if REAL_EXECUTION:
                 result = add_real_sandbox_run(request)
+                if context and result.get("accepted"):
+                    result["resume"] = {"source_run_id": context["run"]["id"], "estimated_tokens": context["estimated_tokens"]}
                 return self._json(result, 201 if result.get("accepted") else 429)
-            return self._json(add_demo_run(request), 201)
+            result = add_demo_run(request)
+            if context:
+                result["resume"] = {"source_run_id": context["run"]["id"], "estimated_tokens": context["estimated_tokens"]}
+            return self._json(result, 201)
+        elif path == "/api/registry":
+            entry_type = data.get("type", "skill")
+            name = str(data.get("name", "")).strip()
+            if not name:
+                return self._json({"error": "name is required"}, 400)
+            from hermes_collab_engine.registry import get_unified_registry, SkillEntry, MCPEntry
+            registry = get_unified_registry()
+            if entry_type == "skill":
+                entry = SkillEntry(name=name, display_name=data.get("display_name", name), category=data.get("category", "custom"), description=data.get("description", ""), capabilities=data.get("capabilities", ["*"]), source="web-ui", priority=int(data.get("priority", 2)), content=data.get("content", ""))
+            elif entry_type == "mcp":
+                entry = MCPEntry(name=name, display_name=data.get("display_name", name), category=data.get("category", "mcp"), description=data.get("description", ""), capabilities=data.get("capabilities", ["*"]), source="web-ui", priority=int(data.get("priority", 2)), server_name=data.get("server_name", ""), tool_name=data.get("tool_name", ""), endpoint=data.get("endpoint", ""), allowed_tools=data.get("allowed_tools", []))
+            else:
+                return self._json({"error": f"unknown type: {entry_type}"}, 400)
+            registry.register(entry)
+            return self._json({"ok": True, "name": name, "type": entry_type})
         self._json({"error": "not found"}, 404)
 
     def log_message(self, fmt, *args) -> None:

@@ -2,7 +2,10 @@
   "env": {
     "ANTHROPIC_BASE_URL": "https://api.example.com",
     "ANTHROPIC_API_KEY": "replace-with-your-api-key",
-    "ANTHROPIC_MODEL": "replace-with-your-model"
+    "ANTHROPIC_MODEL": "replace-with-your-model",
+    "HERMES_COLLAB_WORKER_GIT_TOKEN": "replace-with-env-injected-token",
+    "HERMES_COLLAB_WORKER_GIT_USERNAME": "x-access-token",
+    "HERMES_COLLAB_WORKER_GIT_ALLOWED_HOSTS": "github.com"
   },
   "permissions": {
     "allow": [],

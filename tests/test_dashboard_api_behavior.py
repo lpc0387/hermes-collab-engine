@@ -72,13 +72,13 @@ class DashboardApiBehaviorTests(unittest.TestCase):
         self.assertEqual(detail["run"]["request"], long_request)
         self.assertEqual(len(detail["run"]["request"]), len(long_request))
 
-    def test_config_exposes_effective_readonly_model_names(self):
+    def test_config_exposes_effective_model_names(self):
         cfg = self.get_json("/api/config")
         self.assertEqual(cfg["leader_model"], "leader-real-model")
         self.assertEqual(cfg["worker_model"], "worker-real-model")
         self.assertEqual(cfg["effective_leader_model"], "leader-real-model")
         self.assertEqual(cfg["effective_worker_model"], "worker-real-model")
-        self.assertTrue(cfg["model_overrides_readonly"])
+        self.assertFalse(cfg["model_overrides_readonly"])
 
     def test_config_uses_environment_fallbacks_when_server_started_without_cli_models(self):
         env = {
@@ -93,7 +93,71 @@ class DashboardApiBehaviorTests(unittest.TestCase):
         self.assertEqual(cfg["model"], "shared-env-model")
         self.assertEqual(cfg["effective_leader_model"], "leader-env-model")
         self.assertEqual(cfg["effective_worker_model"], "worker-env-model")
-        self.assertTrue(cfg["model_overrides_readonly"])
+        self.assertFalse(cfg["model_overrides_readonly"])
+
+    def test_interrupt_endpoint_marks_running_run_as_failed(self):
+        store = CollabStore(self.db_path)
+        store.create_run("run_intr", "中断测试", "test request", {"overall": 1})
+        store.update_run("run_intr", "running")
+
+        req = urllib.request.Request(
+            f"{self.base}/api/runs/run_intr/interrupt",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        resp = json.loads(urllib.request.urlopen(req, timeout=3).read().decode())
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["run_id"], "run_intr")
+
+        # verify run is now failed
+        runs = self.get_json("/api/runs")
+        match = [r for r in runs if r["id"] == "run_intr"]
+        self.assertEqual(match[0]["status"], "failed")
+
+    def test_interrupt_endpoint_returns_404_for_missing_run(self):
+        req = urllib.request.Request(
+            f"{self.base}/api/runs/nonexistent/interrupt",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=3)
+            self.fail("expected HTTPError")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)
+
+    def test_interrupt_endpoint_returns_409_for_completed_run(self):
+        store = CollabStore(self.db_path)
+        store.create_run("run_done", "已完成", "test", {"overall": 1})
+        store.update_run("run_done", "completed")
+
+        req = urllib.request.Request(
+            f"{self.base}/api/runs/run_done/interrupt",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=3)
+            self.fail("expected HTTPError")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 409)
+
+    def test_resume_context_returns_404_when_no_runs(self):
+        import urllib.error
+        try:
+            urllib.request.urlopen(f"{self.base}/api/resume-context", timeout=3).read()
+            self.fail("expected HTTPError 404")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)
+
+    def test_resume_context_returns_run_data_when_runs_exist(self):
+        store = CollabStore(self.db_path)
+        store.create_run("run_resume", "恢复测试", "original task request", {"overall": 1})
+
+        ctx = self.get_json("/api/resume-context")
+        self.assertEqual(ctx["run"]["id"], "run_resume")
+        self.assertIn("summary", ctx)
+        self.assertIn("estimated_tokens", ctx)
 
 
 if __name__ == "__main__":

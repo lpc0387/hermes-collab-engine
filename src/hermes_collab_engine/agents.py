@@ -33,6 +33,8 @@ class AgentBackend:
     prompt_prefix: str                 # text prepended to prompt
     prompt_suffix: str                 # text appended to prompt
     default_allowed_tools: list[str]   # tools allowed by default
+    capabilities: list[str] = field(default_factory=list)  # e.g. ["file-edit","git-ops","test-run"]
+    enabled: bool = True
 
     def build_command(
         self,
@@ -169,10 +171,11 @@ _register_builtin(AgentBackend(
     prompt_suffix="",
     default_allowed_tools=[
         "Read", "Edit", "Write", "MultiEdit",
-        "Bash(git diff*)", "Bash(git status*)", "Bash(git ls-files*)",
+        "Bash(git diff*)", "Bash(git status*)", "Bash(git ls-files*)", "Bash(git clone*)",
         "Bash(git add*)", "Bash(git commit*)", "Bash(git push*)",
         "Bash(python3 -m unittest*)", "Bash(python3 -m py_compile*)", "Bash(bash -n*)",
     ],
+    capabilities=["file-edit", "git-ops", "test-run", "mcp-host", "search"],
 ))
 
 _register_builtin(AgentBackend(
@@ -190,6 +193,7 @@ _register_builtin(AgentBackend(
     prompt_prefix="You are a Codex worker in a Hermes collaboration engine.",
     prompt_suffix="",
     default_allowed_tools=[],
+    capabilities=["file-edit", "git-ops"],
 ))
 
 _register_builtin(AgentBackend(
@@ -207,6 +211,25 @@ _register_builtin(AgentBackend(
     prompt_prefix="You are an OpenCode worker in a Hermes collaboration engine.",
     prompt_suffix="",
     default_allowed_tools=[],
+    capabilities=["file-edit", "git-ops"],
+))
+
+_register_builtin(AgentBackend(
+    name="hermes",
+    display_name="Hermes Agent",
+    command=["hermes"],
+    prompt_flag="",
+    output_format_flags=[],
+    supports_model_flag=True,
+    model_flag="--model",
+    permission_flags=None,
+    allowed_tools_flag=None,
+    output_parser="raw_text",
+    process_pattern="hermes",
+    prompt_prefix="You are Hermes, the orchestration agent in a collaboration engine.",
+    prompt_suffix="",
+    default_allowed_tools=[],
+    capabilities=["planning", "analysis", "orchestration", "delegation", "file-edit", "git-ops", "search"],
 ))
 
 
@@ -227,6 +250,19 @@ def detect_available_backends() -> list[AgentBackend]:
     return [b for b in _BUILTINS.values() if b.is_available()]
 
 
+def backends_for_capability(capability: str) -> list[AgentBackend]:
+    """Return backends that declare the given capability."""
+    return [b for b in _BUILTINS.values() if capability in b.capabilities]
+
+
 def register_backend(backend: AgentBackend) -> None:
     """Register a custom backend at runtime (or override a built-in)."""
     _BUILTINS[backend.name] = backend
+
+
+def delete_backend(name: str) -> bool:
+    """Remove a registered backend by name. Returns True if removed, False if not found."""
+    if name in _BUILTINS:
+        del _BUILTINS[name]
+        return True
+    return False

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
+import fnmatch
 import os
+import re
 import subprocess
 import threading
 import time
@@ -16,6 +19,7 @@ from .planner import Planner
 from .skills import SkillRegistry, get_default_registry
 from .store import CollabStore
 from .tools import ToolRegistry, get_default_tool_registry
+from .registry import get_unified_registry, SkillEntry as USkillEntry, ToolEntry as UToolEntry, MCPEntry as UMCPEntry
 
 
 class CollabEngine:
@@ -45,6 +49,8 @@ class CollabEngine:
         self.skill_registry = skill_registry or get_default_registry()
         self.tool_registry = tool_registry or get_default_tool_registry()
         self.store = CollabStore(db_path)
+        # Initialize unified registry with store for persistence
+        get_unified_registry(store=self.store)
         self.planner = Planner(self.cwd, model=self.leader_model, store=self.store)
         self._node_results: dict[str, str] = {}
         self._node_results_struct: dict[str, dict[str, Any] | None] = {}
@@ -54,6 +60,10 @@ class CollabEngine:
         self._checkpoint_paused_nodes: set[str] = set()
         self._paused_runs: set[str] = set()
         self._file_allowlist: set[str] = set()
+        self._active_write_targets: dict[str, set[str]] = {}
+        self._write_targets_lock = threading.Lock()
+        self._active_fingerprints: dict[str, str] = {}
+        self._fingerprint_lock = threading.Lock()
         self._restore_all_run_states()
 
     def _persist_run_state(self, run_id: str) -> None:
@@ -99,7 +109,7 @@ class CollabEngine:
         if score.routing == "direct":
             plan = Plan(nodes=[WBSNode("wbs-1", "Direct execution", request, "general", score.overall, [], True, "Direct answer")])
         else:
-            plan = self.planner.decompose(request)
+            plan = self.planner.decompose(request, capabilities=self.agent_backend.capabilities)
         if isinstance(plan, list):
             plan = Plan(nodes=plan)
         nodes = plan.nodes
@@ -117,6 +127,7 @@ class CollabEngine:
             node_data = node.to_dict()
             node_data["shared_brief"] = plan.shared_brief
             self.store.insert_wbs_node(run_id, node_data)
+        self._preallocate_skills_tools(run_id, nodes)
         self._restore_run_state(run_id)
         self.store.update_run(run_id, "running")
 
@@ -149,8 +160,34 @@ class CollabEngine:
                             self.store.log(run_id, "warning", "dependency deadlock avoided", {"node": ready[0].id})
 
                         node = ready[0]
+                        duplicate_of = self._duplicate_running_node(node)
+                        if duplicate_of:
+                            pending.pop(node.id, None)
+                            reason = f"duplicate of active node {duplicate_of}"
+                            result = WorkerResult(node.id, node.title, True, f"Skipped duplicate worker: {reason}", None, 0.0, 0, "", node.attempt, {"status": "ok", "summary": reason})
+                            results.append(result)
+                            completed.add(node.id)
+                            self.store.update_node(node.id, "completed", result.result, None, 0.0, None, run_id=run_id)
+                            self.store.log(run_id, "warning", "duplicate worker killed before launch", {"node": node.id, "duplicate_of": duplicate_of, "fingerprint": self._node_fingerprint(node)}, node.id)
+                            self._record_node_result(run_id, result)
+                            continue
+                        blocked_by = self._blocked_by_active_write(node)
+                        if blocked_by:
+                            if len(ready) > 1:
+                                ready = [candidate for candidate in ready if not self._blocked_by_active_write(candidate)]
+                                if not ready:
+                                    break
+                                node = ready[0]
+                            else:
+                                break
                         pending.pop(node.id, None)
+                        self._claim_fingerprint(node)
+                        write_targets = self._claim_write_targets(node)
+                        if write_targets:
+                            self.store.log(run_id, "info", "worker write targets claimed", {"node": node.id, "write_targets": sorted(write_targets)}, node.id)
                         if self._should_split_proactively(node, timeout, max_retries, split_count):
+                            self._release_fingerprint(node.id)
+                            self._release_write_targets(node.id)
                             shards = self._split_node(node, split_count)
                             split_children[node.id] = {shard.id for shard in shards}
                             split_finished[node.id] = set()
@@ -187,6 +224,8 @@ class CollabEngine:
                     done, _ = concurrent.futures.wait(running.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
                     for fut in done:
                         node = running.pop(fut)
+                        self._release_fingerprint(node.id)
+                        self._release_write_targets(node.id)
                         try:
                             node_results = fut.result()
                         except Exception as exc:
@@ -249,12 +288,22 @@ class CollabEngine:
             ok = not failed_final and (final.ok if final else True)
             self.store.update_run(run_id, "completed" if ok else "failed")
             self.store.log(run_id, "info" if ok else "error", "run finished", {"ok": ok})
+
+            # Collect high-value lessons for parent (Hermes) memory mapping
+            _EXCLUDED_CATEGORIES = {"planning", "worker-contract"}
+            lessons_learned: list[dict[str, Any]] = []
+            for scope in ("engine", "parent"):
+                for lesson in self.store.lessons(limit=100, scope=scope):
+                    if lesson.get("category") not in _EXCLUDED_CATEGORIES:
+                        lessons_learned.append(lesson)
+
             return {
                 "run_id": run_id,
                 "ok": ok,
                 "complexity": score.to_dict(),
                 "results": [r.to_dict() for r in results],
                 "aggregate": final.to_dict() if final else None,
+                "lessons_learned": lessons_learned,
             }
         except BaseException as exc:
             self.store.fail_stale_run(run_id, f"interrupted: {type(exc).__name__}: {exc}")
@@ -264,9 +313,91 @@ class CollabEngine:
                 self._current_plan = None
                 self._node_results = {}
                 self._node_results_struct = {}
+            with self._write_targets_lock:
+                self._active_write_targets = {}
+            with self._fingerprint_lock:
+                self._active_fingerprints = {}
             self._risk_assessments = []
             self._checkpoint_paused_nodes.clear()
             self._paused_runs.discard(run_id)
+
+    def _node_fingerprint(self, node: WBSNode) -> str:
+        if node.fingerprint:
+            return node.fingerprint
+        text = " ".join([
+            node.title,
+            node.description,
+            node.capability,
+        ]).lower()
+        words = re.findall(r"[\w/.-]+", text)
+        stop_words = {
+            "the", "and", "for", "with", "from", "that", "this", "task", "node", "phase",
+            "implementation", "analysis", "planning", "verification", "实现", "分析", "规划", "验证",
+        }
+        normalized = " ".join(word for word in words if len(word) > 2 and word not in stop_words)
+        if not normalized:
+            normalized = f"{node.capability}:{node.title.lower()}"
+        node.fingerprint = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
+        return node.fingerprint
+
+    def _duplicate_running_node(self, node: WBSNode) -> str | None:
+        fingerprint = self._node_fingerprint(node)
+        with self._fingerprint_lock:
+            return self._active_fingerprints.get(fingerprint)
+
+    def _claim_fingerprint(self, node: WBSNode) -> str:
+        fingerprint = self._node_fingerprint(node)
+        with self._fingerprint_lock:
+            self._active_fingerprints[fingerprint] = node.id
+        return fingerprint
+
+    def _release_fingerprint(self, node_id: str) -> None:
+        with self._fingerprint_lock:
+            for fingerprint, active_node_id in list(self._active_fingerprints.items()):
+                if active_node_id == node_id:
+                    self._active_fingerprints.pop(fingerprint, None)
+
+    def _node_write_targets(self, node: WBSNode) -> set[str]:
+        if node.capability not in {"implementation", "coding", "debugging", "docs"}:
+            return set()
+        targets = {str(target).strip().strip("/") for target in node.write_targets if str(target).strip()}
+        if targets:
+            return targets
+        return {"."}
+
+    def _targets_overlap(self, left: set[str], right: set[str]) -> bool:
+        if not left or not right:
+            return False
+        for a in left:
+            for b in right:
+                if a == "." or b == ".":
+                    return True
+                if a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/"):
+                    return True
+                if fnmatch.fnmatch(a, b) or fnmatch.fnmatch(b, a):
+                    return True
+        return False
+
+    def _blocked_by_active_write(self, node: WBSNode) -> str | None:
+        targets = self._node_write_targets(node)
+        if not targets:
+            return None
+        with self._write_targets_lock:
+            for node_id, active in self._active_write_targets.items():
+                if self._targets_overlap(targets, active):
+                    return node_id
+        return None
+
+    def _claim_write_targets(self, node: WBSNode) -> set[str]:
+        targets = self._node_write_targets(node)
+        if targets:
+            with self._write_targets_lock:
+                self._active_write_targets[node.id] = targets
+        return targets
+
+    def _release_write_targets(self, node_id: str) -> None:
+        with self._write_targets_lock:
+            self._active_write_targets.pop(node_id, None)
 
     def _effective_timeout(self, node: WBSNode, timeout: int) -> int:
         if node.estimated_duration:
@@ -379,6 +510,7 @@ class CollabEngine:
         Phase 1 (parallel, read-only): scope + evidence — collect context.
         Phase 2 (depends on phase 1): implementation — actually write files.
         """
+        parent_fingerprint = self._node_fingerprint(node)
         # Phase 1: read-only context shards
         scope_shard = WBSNode(
             id=f"{node.id}-scope-1",
@@ -397,6 +529,8 @@ class CollabEngine:
             parent_id=node.id,
             attempt=node.attempt + 1,
             brief=node.brief,
+            write_targets=[],
+            fingerprint=f"{parent_fingerprint}:scope",
         )
         evidence_shard = WBSNode(
             id=f"{node.id}-evidence-2",
@@ -415,6 +549,8 @@ class CollabEngine:
             parent_id=node.id,
             attempt=node.attempt + 1,
             brief=node.brief,
+            write_targets=[],
+            fingerprint=f"{parent_fingerprint}:evidence",
         )
         # Phase 2: implementation shards that depend on phase 1
         impl_shards = []
@@ -437,6 +573,8 @@ class CollabEngine:
                 parent_id=node.id,
                 attempt=node.attempt + 1,
                 brief=node.brief,
+                write_targets=list(node.write_targets),
+                fingerprint=f"{parent_fingerprint}:impl:{i}",
             )
             impl_shards.append(impl_shard)
         return [scope_shard, evidence_shard] + impl_shards
@@ -534,16 +672,137 @@ class CollabEngine:
         return "\n".join(part for part in (node.title, node.deliverable, node.brief, node.description) if part)
 
     def _skills_for_worker(self, node: WBSNode) -> tuple[list[str], str]:
-        selected = self.skill_registry.select_for_node(node.capability, self._task_text_for_worker(node))
-        return [skill.name for skill in selected], self.skill_registry.render_for_prompt(selected)
+        task_text = self._task_text_for_worker(node)
+        # Legacy registry selection
+        selected = self.skill_registry.select_for_node(node.capability, task_text)
+        names = {skill.name for skill in selected}
+        # Bridge: pull web-added entries from UnifiedRegistry (skip built-in "hermes" source)
+        unified = get_unified_registry()
+        for us in unified.select_skills(node.capability, task_text, max_skills=16):
+            if us.name not in names and us.source != "hermes":
+                names.add(us.name)
+                selected.append(us)
+        return list(names), self.skill_registry.render_for_prompt(selected)
 
     def _tools_for_worker(self, node: WBSNode) -> tuple[list[str], list[str], str]:
-        profiles = self.tool_registry.select_for_node(node.capability, self._task_text_for_worker(node))
-        return (
-            [profile.name for profile in profiles],
-            self.tool_registry.allowed_tools_for_profiles(profiles),
-            self.tool_registry.render_for_prompt(profiles),
-        )
+        task_text = self._task_text_for_worker(node)
+        # Legacy registry selection
+        profiles = self.tool_registry.select_for_node(node.capability, task_text)
+        names = {profile.name for profile in profiles}
+        allowed = self.tool_registry.allowed_tools_for_profiles(profiles)
+        # Bridge: pull web-added entries from UnifiedRegistry (skip built-in "hermes" source)
+        unified = get_unified_registry()
+        for ut in unified.select_tools(node.capability, task_text, max_tools=16):
+            if ut.name not in names and ut.source != "hermes":
+                names.add(ut.name)
+                profiles.append(ut)
+                for t in ut.allowed_tools:
+                    if t not in allowed:
+                        allowed.append(t)
+        # Bridge MCP entries: their allowed_tools flow into the tool whitelist
+        for mcp in unified.select_mcp(node.capability, max_entries=8):
+            if mcp.name not in names and mcp.source != "hermes":
+                names.add(mcp.name)
+                profiles.append(mcp)
+                for t in mcp.allowed_tools:
+                    if t not in allowed:
+                        allowed.append(t)
+        return (list(names), allowed, self.tool_registry.render_for_prompt(profiles))
+
+    def _render_skills_from_names(self, names: list[str]) -> str:
+        """Reconstruct the skills prompt block from a list of skill names."""
+        unified = get_unified_registry()
+        skills = []
+        for name in names:
+            entry = self.skill_registry.get(name)
+            if entry is None:
+                # Check unified registry for web-added skills
+                for us in unified.list_by_type(USkillEntry):
+                    if us.name == name:
+                        entry = us
+                        break
+            if entry is not None:
+                skills.append(entry)
+        return self.skill_registry.render_for_prompt(skills)
+
+    def _render_tools_from_names(self, names: list[str]) -> tuple[list[str], str]:
+        """Reconstruct the tools prompt block and allowed_tools from profile names."""
+        unified = get_unified_registry()
+        profiles = []
+        allowed: list[str] = []
+        for name in names:
+            entry = self.tool_registry.get(name)
+            if entry is None:
+                for ut in unified.list_by_type(UToolEntry) + unified.list_by_type(UMCPEntry):
+                    if ut.name == name:
+                        entry = ut
+                        break
+            if entry is not None:
+                profiles.append(entry)
+                for t in getattr(entry, 'allowed_tools', []):
+                    if t not in allowed:
+                        allowed.append(t)
+        return allowed, self.tool_registry.render_for_prompt(profiles)
+
+    def _preallocate_skills_tools(self, run_id: str, nodes: list[WBSNode]) -> None:
+        """Pre-compute skills/tools for all nodes before workers start.
+
+        Called once after WBS decomposition, before worker dispatch.
+        Stores results in node.skills_json and node.tools_json so workers
+        skip per-worker registry traversal.
+        Respects leader-assigned skills_json/tools_json when present.
+        Filters out built-in (source="hermes") entries that overlap with
+        the agent's native capabilities.  Non-built-in entries (web-ui, mcp,
+        etc.) are always preserved regardless of capability overlap.
+        """
+        native_caps = set(self.agent_backend.capabilities)
+        for node in nodes:
+            try:
+                # Respect leader-assigned values; only fill gaps via registry
+                if not node.skills_json:
+                    skill_names, _skills_block = self._skills_for_worker(node)
+                    node.skills_json = json.dumps(skill_names)
+                if not node.tools_json:
+                    tool_profile_names, _tool_allowed, _tools_block = self._tools_for_worker(node)
+                    node.tools_json = json.dumps(tool_profile_names)
+                # Filter out built-in SKILLS already covered by native capabilities.
+                # Do NOT filter tool profiles — they are permission whitelists,
+                # not capability indicators. Removing them would strip the worker
+                # of necessary permissions (e.g., Read/Edit/Write).
+                if native_caps:
+                    if node.skills_json:
+                        skill_names = json.loads(node.skills_json)
+                        skill_names = [
+                            n for n in skill_names
+                            if not (n in native_caps and self._is_hermes_builtin_skill(n))
+                        ]
+                        node.skills_json = json.dumps(skill_names)
+                self.store.update_node_skills_tools(node.id, node.skills_json, node.tools_json)
+            except Exception:
+                # Pre-allocation failure is non-fatal; worker falls back to per-worker selection
+                self.store.log(run_id, "warning", "skill/tool pre-allocation failed", {"node": node.id}, node.id)
+
+    def _is_hermes_builtin_skill(self, name: str) -> bool:
+        """Check if a skill name refers to a built-in hermes skill."""
+        entry = self.skill_registry.get(name)
+        if entry is not None:
+            return getattr(entry, "source", "hermes") == "hermes"
+        unified = get_unified_registry()
+        for us in unified.list_by_type(USkillEntry):
+            if us.name == name:
+                return us.source == "hermes"
+        return False
+
+    def _is_hermes_builtin_tool(self, name: str) -> bool:
+        """Check if a tool profile name refers to a built-in hermes tool."""
+        entry = self.tool_registry.get(name)
+        if entry is not None:
+            return getattr(entry, "source", "hermes") == "hermes"
+        unified = get_unified_registry()
+        for ut in unified.list_by_type(UToolEntry) + unified.list_by_type(UMCPEntry):
+            if ut.name == name:
+                return ut.source == "hermes"
+        return False
 
     def _env_for_role(self, role: str) -> dict[str, str]:
         prefix = f"HERMES_COLLAB_{role.upper()}_"
@@ -560,7 +819,54 @@ class CollabEngine:
                 continue
             for target in targets:
                 env[target] = value
+        git_value_map = {
+            "GIT_TOKEN": "HERMES_COLLAB_GIT_TOKEN",
+            "GIT_USERNAME": "HERMES_COLLAB_GIT_USERNAME",
+            "GIT_ALLOWED_HOSTS": "HERMES_COLLAB_GIT_ALLOWED_HOSTS",
+            "GIT_CREDENTIAL_HELPER": "HERMES_COLLAB_GIT_CREDENTIAL_HELPER",
+        }
+        for source_suffix, target in git_value_map.items():
+            value = os.environ.get(prefix + source_suffix)
+            if value:
+                env[target] = value
+        self._configure_git_credentials(env)
         return env
+
+    def _append_git_config(self, env: dict[str, str], key: str, value: str) -> None:
+        try:
+            index = int(env.get("GIT_CONFIG_COUNT", "0"))
+        except ValueError:
+            index = 0
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+        env["GIT_CONFIG_COUNT"] = str(index + 1)
+
+    def _configure_git_credentials(self, env: dict[str, str]) -> None:
+        env.setdefault("GIT_TERMINAL_PROMPT", "0")
+        helper = env.get("HERMES_COLLAB_GIT_CREDENTIAL_HELPER")
+        token = env.get("HERMES_COLLAB_GIT_TOKEN")
+        if helper:
+            self._append_git_config(env, "credential.helper", helper)
+            return
+        if not token:
+            return
+        env.setdefault("HERMES_COLLAB_GIT_USERNAME", "x-access-token")
+        env.setdefault("HERMES_COLLAB_GIT_ALLOWED_HOSTS", "github.com")
+        self._append_git_config(
+            env,
+            "credential.helper",
+            "!f() { "
+            "test \"$1\" = get || exit 0; "
+            "protocol=; host=; "
+            "while IFS= read -r line; do "
+            "case \"$line\" in protocol=*) protocol=${line#protocol=};; host=*) host=${line#host=};; esac; "
+            "done; "
+            "test \"$protocol\" = https || exit 0; "
+            "case \",${HERMES_COLLAB_GIT_ALLOWED_HOSTS},\" in *,\"$host\",*) ;; *) exit 0;; esac; "
+            "test -n \"$HERMES_COLLAB_GIT_TOKEN\" || exit 0; "
+            "printf 'username=%s\\npassword=%s\\n' \"$HERMES_COLLAB_GIT_USERNAME\" \"$HERMES_COLLAB_GIT_TOKEN\"; "
+            "}; f",
+        )
 
     def _run_worker(self, run_id: str, node: WBSNode, timeout: int, model_override: str | None = None, role: str = "worker") -> WorkerResult:
         worker_id = f"worker_{run_id}_{node.id}_{node.attempt}"
@@ -570,8 +876,16 @@ class CollabEngine:
         upstream_block = self._build_upstream_context(node)
         shared_brief_block = self._shared_brief_for_worker(node)
         brief_block = f"Brief:\n{node.brief}\n\n" if node.brief else ""
-        skill_names, skills_block = self._skills_for_worker(node)
-        tool_profile_names, tool_allowed, tools_block = self._tools_for_worker(node)
+        if node.skills_json:
+            skill_names = json.loads(node.skills_json)
+            skills_block = self._render_skills_from_names(skill_names)
+        else:
+            skill_names, skills_block = self._skills_for_worker(node)
+        if node.tools_json:
+            tool_profile_names = json.loads(node.tools_json)
+            tool_allowed, tools_block = self._render_tools_from_names(tool_profile_names)
+        else:
+            tool_profile_names, tool_allowed, tools_block = self._tools_for_worker(node)
         backend = self.agent_backend
         # Tool manager acts as whitelist: if profiles matched, use only their tools;
         # if no profiles matched, fall back to backend defaults
@@ -579,20 +893,21 @@ class CollabEngine:
             final_allowed = tool_allowed
         else:
             final_allowed = list(backend.default_allowed_tools)
-        if skill_names:
-            self.store.log(run_id, "info", "worker skills selected", {"node": node.id, "skills": skill_names}, node.id)
-        if tool_profile_names:
-            self.store.log(run_id, "info", "worker tool profiles selected", {"node": node.id, "profiles": tool_profile_names, "allowed_tools": final_allowed}, node.id)
+        # Skills/tools are pre-allocated by Leader at WBS time; no per-worker log needed
         # Persist skills/tools to node for dashboard display
         import json as _json
         self.store.update_node_skills_tools(node.id, _json.dumps(skill_names), _json.dumps(tool_profile_names))
+        write_targets = self._node_write_targets(node)
+        write_block = ""
+        if write_targets:
+            write_block = "Write targets reserved for this worker: " + ", ".join(sorted(write_targets)) + "\nOnly modify files under these repository-relative targets.\n\n"
         prompt = f"""{backend.prompt_prefix}
 
 WBS node: {node.title}
 Capability: {node.capability}
 Deliverable: {node.deliverable}
 
-{skills_block}{tools_block}{shared_brief_block}{brief_block}{upstream_block}Task:
+{skills_block}{tools_block}{write_block}{shared_brief_block}{brief_block}{upstream_block}Task:
 {node.description}
 
 Work in cwd: {self.cwd}
@@ -736,13 +1051,23 @@ Output contract:
         self.store.log(run_id, "resume", f"Run resumed by parent{': '+reason if reason else ''}")
         return {"ok": True, "run_id": run_id, "action": "resumed"}
 
+    _READ_ONLY_CAPABILITIES = frozenset({"analysis", "planning", "verification"})
+
     def _detect_risks(self, node: WBSNode, result_struct: dict[str, Any] | None, risk_policy: RiskPolicy) -> list[tuple[str, str]]:
         """Detect risk events from a completed node. Returns [(risk_level, description)]."""
         risks: list[tuple[str, str]] = []
         if result_struct:
-            blocking = result_struct.get("blocking_issues") or result_struct.get("notes")
+            blocking_issues = result_struct.get("blocking_issues")
+            notes = result_struct.get("notes")
+            blocking = blocking_issues or notes
             if blocking and isinstance(blocking, list) and len(blocking) > 0:
-                risks.append(("medium", f"Node {node.id} reports blocking issues: {blocking}"))
+                # Read-only nodes (analysis/planning/verification) reporting
+                # notes without explicit blocking_issues are expected — no-edit
+                # output is normal for these capabilities.
+                if not blocking_issues and node.capability in self._READ_ONLY_CAPABILITIES:
+                    risks.append(("low", f"Node {node.id} read-only notes (no edits expected): {blocking}"))
+                else:
+                    risks.append(("medium", f"Node {node.id} reports blocking issues: {blocking}"))
             files = result_struct.get("files_modified") or result_struct.get("files_touched") or []
             if self._file_allowlist and files:
                 for f in files:
@@ -760,7 +1085,7 @@ Output contract:
             assessment = {"risk_level": risk_level, "description": desc, "action": action}
             self._risk_assessments.append(assessment)
             self.store.log(run_id, "risk", f"[{risk_level}] {desc} (action={action})")
-            if action in ("notify", "pause"):
+            if action in ("notify", "pause", "checkpoint"):
                 # Find which node this risk is about (extract from desc)
                 node_id = ""
                 for n in self._current_plan.nodes if self._current_plan else []:
@@ -865,6 +1190,12 @@ Output contract:
         shared_brief = ""
         for n in nodes_data:
             deps = json.loads(n.get("dependencies_json", "[]"))
+            try:
+                write_targets = json.loads(n.get("write_targets_json") or "[]")
+            except json.JSONDecodeError:
+                write_targets = []
+            if not isinstance(write_targets, list):
+                write_targets = []
             wbs_node = WBSNode(
                 id=n.get("id", ""),
                 title=n.get("title", ""),
@@ -879,6 +1210,10 @@ Output contract:
                 attempt=n.get("attempt", 1),
                 checkpoint=bool(n.get("checkpoint", 0)),
                 estimated_duration=n.get("estimated_duration"),
+                write_targets=[str(target) for target in write_targets if str(target).strip()],
+                fingerprint=str(n.get("fingerprint") or ""),
+                skills_json=str(n.get("skills_json") or ""),
+                tools_json=str(n.get("tools_json") or ""),
             )
             wbs_nodes.append(wbs_node)
             if n.get("shared_brief"):

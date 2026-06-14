@@ -93,6 +93,8 @@ class EngineToolInjectionTests(unittest.TestCase):
                 stderr="",
             )
             with patch("src.hermes_collab_engine.engine.subprocess.run", return_value=completed) as mock_run:
+                # Simulate Leader pre-allocating tools to the node
+                node.tools_json = json.dumps(["file-edit", "python-tests"])
                 result = engine._run_worker("run_test", node, timeout=30)
 
             self.assertTrue(result.ok)
@@ -105,14 +107,11 @@ class EngineToolInjectionTests(unittest.TestCase):
             self.assertIn("Tool profiles selected by Hermes", prompt)
             self.assertIn("File Read/Edit", prompt)
             self.assertIn("Python Test Runner", prompt)
-            log = engine.store._one(
-                "SELECT data_json FROM logs WHERE run_id=? AND node_id=? AND message='worker tool profiles selected'",
-                ("run_test", "wbs-impl"),
-            )
-            self.assertIsNotNone(log)
-            data = json.loads(log["data_json"])
-            self.assertIn("file-edit", data["profiles"])
-            self.assertIn("python-tests", data["profiles"])
+            # Tools are now Leader-allocated; verify via node.tools_json
+            self.assertIsNotNone(node.tools_json)
+            tool_names = json.loads(node.tools_json)
+            self.assertIn("file-edit", tool_names)
+            self.assertIn("python-tests", tool_names)
 
     def test_empty_tool_registry_falls_back_to_backend_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:

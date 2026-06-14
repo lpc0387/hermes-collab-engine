@@ -380,6 +380,7 @@ td{padding:6px 6px;border-bottom:1px dashed var(--line);vertical-align:top}
 tr:last-child td{border-bottom:0}
 tr.run-row{transition:background .1s}
 tr.run-row:hover{background:var(--bg-2)}
+.run-title{display:inline-block;vertical-align:bottom;word-break:break-word;line-height:1.3}
 .link{
   color:var(--sky);text-decoration:none;font-weight:600;
   border-bottom:1px dotted var(--sky);
@@ -474,7 +475,7 @@ tr.run-row:hover{background:var(--bg-2)}
   .submit-bar{padding:10px 12px}
   .submit-models{grid-template-columns:1fr}
   .submit-actions{flex-direction:column-reverse;align-items:stretch}
-  .submit-actions .run-btn{width:100%}
+  .submit-actions .action-card{width:100%}
 }
 
 /* ============================================================
@@ -518,25 +519,34 @@ tr.run-row:hover{background:var(--bg-2)}
 }
 .submit-models input[readonly]:focus{border-color:var(--line);box-shadow:none}
 .submit-actions{
-  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  display:flex;gap:12px;align-items:stretch;
 }
 .submit-hint{
   color:var(--ink-3);font-size:13px;font-family:'JetBrains Mono',monospace;
   letter-spacing:.3px;
 }
-.submit-bar .run-btn{
-  border:2px solid var(--line);background:var(--bg-2);color:var(--ink);
-  padding:8px 16px;font-family:'Press Start 2P',monospace;font-size:11px;
-  letter-spacing:1px;cursor:pointer;
+.action-card{
+  flex:1;
+  border:2px solid var(--line);background:var(--bg-1);
+  padding:12px 16px;cursor:pointer;
+  font-family:'Press Start 2P',monospace;font-size:11px;
+  letter-spacing:1px;
   box-shadow:3px 3px 0 var(--bg-0);
-  transition:transform .08s,box-shadow .08s,background .15s,border-color .15s;
+  transition:all .1s;
+  text-align:center;position:relative;
 }
-.submit-bar .run-btn:hover:not(:disabled){
-  background:var(--gold);color:var(--bg-0);border-color:var(--gold);
-  transform:translate(-1px,-1px);box-shadow:4px 4px 0 var(--bg-0);
+.action-card::before,.action-card::after{
+  content:'';position:absolute;width:6px;height:6px;background:var(--gold);
+  image-rendering:pixelated;pointer-events:none;
 }
-.submit-bar .run-btn:active:not(:disabled){transform:translate(2px,2px);box-shadow:1px 1px 0 var(--bg-0)}
-.submit-bar .run-btn:disabled{cursor:not-allowed;opacity:.45;background:var(--bg-1);color:var(--ink-3);border-color:var(--line)}
+.action-card::before{top:-4px;left:-4px;box-shadow:calc(100% + 0px) 0 0 var(--gold)}
+.action-card::after{bottom:-4px;left:-4px;box-shadow:calc(100% + 0px) 0 0 var(--gold)}
+.action-card:hover:not(:disabled){
+  transform:translateY(-2px);box-shadow:4px 6px 0 var(--bg-0);
+}
+.action-card:disabled{cursor:not-allowed;opacity:.45}
+.action-card.resume{background:var(--plum);color:var(--bg-0);border-color:var(--plum)}
+.action-card.submit{background:var(--gold);color:var(--bg-0);border-color:var(--gold)}
 .submit-bar .run-toast{
   position:absolute;top:10px;right:14px;
   padding:4px 10px;background:var(--bg-0);border:1px solid var(--line);
@@ -735,6 +745,55 @@ tr.run-row:hover{background:var(--bg-2)}
   .diary-cover{padding:14px 14px 10px}
   .diary-content{font-size:14px;line-height:26px}
 }
+
+/* --- interrupt modal --- */
+.interrupt-modal{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:9999}
+.interrupt-modal .modal-box{background:var(--bg-1);border:2px solid var(--gold);padding:20px;max-width:380px;width:90%;font-family:'VT323',monospace;font-size:14px;color:var(--ink);box-shadow:4px 4px 0 var(--bg-0)}
+.interrupt-modal .modal-box h3{font-family:'Press Start 2P',monospace;font-size:11px;color:var(--gold);margin:0 0 12px}
+.interrupt-modal .modal-btns{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+.interrupt-modal .modal-btns button{flex:1;min-width:80px;padding:6px 8px;border:2px solid var(--line);background:var(--bg-1);color:var(--ink);font-family:'VT323',monospace;font-size:13px;cursor:pointer;box-shadow:2px 2px 0 var(--bg-0)}
+.interrupt-modal .modal-btns button:hover{border-color:var(--gold);color:var(--gold)}
+.interrupt-modal .modal-btns .btn-danger{border-color:var(--rose);color:var(--rose)}
+.interrupt-modal .modal-btns .btn-danger:hover{background:var(--rose);color:var(--bg-0)}
+
+/* --- task queue in submit bar --- */
+.task-queue{margin-top:8px;font-family:'VT323',monospace;font-size:13px}
+.task-queue .q-item{display:flex;align-items:center;gap:6px;padding:4px 6px;border:1px dashed var(--line);margin-bottom:2px}
+.task-queue .q-num{color:var(--gold);font-family:'Press Start 2P',monospace;font-size:9px;min-width:18px}
+.task-queue .q-text{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-2)}
+.task-queue .q-del{background:none;border:1px solid var(--line);color:var(--ink-3);cursor:pointer;font-size:11px;padding:0 4px;font-family:'VT323',monospace}
+.task-queue .q-del:hover{border-color:var(--rose);color:var(--rose)}
+.action-card.resume.active{border-color:var(--leaf);background:var(--leaf);color:var(--bg-0)}
+
+/* --- skill/MCP management --- */
+.mgmt-section{margin-top:14px;border-top:2px dashed var(--line);padding-top:10px}
+.mgmt-section h3{font-family:'Press Start 2P',monospace;font-size:9px;color:var(--gold);letter-spacing:.5px;margin-bottom:8px}
+.mgmt-row{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
+.mgmt-btn{border:2px solid var(--line);background:var(--bg-1);color:var(--ink-2);padding:4px 8px;font-size:12px;cursor:pointer;font-family:'VT323',monospace;box-shadow:2px 2px 0 var(--bg-0)}
+.mgmt-btn:hover{border-color:var(--gold);color:var(--gold)}
+.mgmt-list{display:grid;gap:4px;max-height:120px;overflow:auto}
+.mgmt-list-item{display:flex;align-items:center;gap:6px;padding:4px 6px;border:1px dashed var(--line);font-size:12px}
+.mgmt-list-item .item-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mgmt-list-item .item-cat{color:var(--ink-3);font-size:11px}
+
+/* --- modals (skill/MCP add) --- */
+.modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:9999}
+.modal-overlay .modal-box{background:var(--bg-1);border:2px solid var(--gold);padding:20px;max-width:440px;width:92%;font-family:'VT323',monospace;font-size:14px;color:var(--ink);box-shadow:4px 4px 0 var(--bg-0)}
+.modal-overlay .modal-box h3{font-family:'Press Start 2P',monospace;font-size:11px;color:var(--gold);margin:0 0 12px}
+.modal-overlay label{display:block;margin-bottom:8px;font-size:13px;color:var(--ink-2)}
+.modal-overlay label input,.modal-overlay label textarea,.modal-overlay label select{display:block;width:100%;margin-top:3px;background:var(--bg-0);border:2px solid var(--line);color:var(--ink);padding:5px 8px;font-family:'VT323',monospace;font-size:14px;outline:none}
+.modal-overlay label input:focus,.modal-overlay label textarea:focus{border-color:var(--gold)}
+.modal-overlay .modal-btns{display:flex;gap:8px;margin-top:14px}
+.modal-overlay .modal-btns button{flex:1;padding:6px 8px;border:2px solid var(--line);background:var(--bg-1);color:var(--ink);font-family:'VT323',monospace;font-size:13px;cursor:pointer;box-shadow:2px 2px 0 var(--bg-0)}
+.modal-overlay .modal-btns button:hover{border-color:var(--gold);color:var(--gold)}
+
+/* --- task set panel --- */
+.taskset-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:8px}
+.taskset-cell{background:var(--bg-0);border:1px solid var(--line);padding:6px 8px;text-align:center}
+.taskset-cell .num{font-family:'Press Start 2P',monospace;font-size:14px;color:var(--gold)}
+.taskset-cell .lbl{font-size:11px;color:var(--ink-3);margin-top:2px}
+.taskset-kills{font-size:12px}
+.taskset-kill{padding:3px 6px;border-left:2px solid var(--amber);margin-bottom:3px;color:var(--amber)}
 </style>
 </head>
 <body>
@@ -761,11 +820,13 @@ tr.run-row:hover{background:var(--bg-2)}
         <label>Leader 模型<input id="leaderModel" name="leader_model" autocomplete="off" placeholder="加载中…" readonly aria-readonly="true"></label>
         <label>Worker 模型<input id="workerModel" name="worker_model" autocomplete="off" placeholder="加载中…" readonly aria-readonly="true"></label>
       </div>
+      <div class="submit-hint">Ctrl+Enter 快速提交</div>
       <div class="submit-actions">
-        <span class="submit-hint">Ctrl+Enter 快速提交</span>
-        <button class="run-btn" id="runBtn" type="submit" disabled>► 提交协同任务</button>
+        <button class="action-card resume" id="resumeBtn" type="button">↩ 接入上次会话</button>
+        <button class="action-card submit" id="runBtn" type="submit" disabled>► 提交协同任务</button>
       </div>
       <div class="run-toast" id="runToast" role="status" aria-live="polite"></div>
+      <div class="task-queue" id="taskQueue" style="display:none"></div>
     </div>
   </form>
 </section>
@@ -841,7 +902,49 @@ tr.run-row:hover{background:var(--bg-2)}
         </div>
         <div id="skillsBox"><div class="empty-msg">点击预览</div></div>
         <div id="toolsBox" style="margin-top:10px"><div class="empty-msg">点击预览</div></div>
+
+        <!-- 技能/MCP 管理 -->
+        <div class="mgmt-section">
+          <h3>▸ 技能管理</h3>
+          <div class="mgmt-row">
+            <button class="mgmt-btn skill-btn" id="addSkillBtn" type="button">＋ 添加技能</button>
+            <button class="mgmt-btn upload-btn" id="uploadSkillBtn" type="button">📁 导入技能文件</button>
+            <input type="file" id="skillFileInput" accept=".md,.txt,.yaml,.yml" style="display:none">
+          </div>
+          <div class="mgmt-list" id="skillList"><div class="empty-msg">暂无自定义技能</div></div>
+        </div>
+
+        <div class="mgmt-section">
+          <h3>▸ MCP 管理</h3>
+          <div class="mgmt-row">
+            <button class="mgmt-btn mcp-btn" id="addMcpBtn" type="button">＋ 添加 MCP</button>
+            <button class="mgmt-btn upload-btn" id="uploadMcpBtn" type="button">📁 导入 MCP 配置</button>
+            <input type="file" id="mcpFileInput" accept=".json" style="display:none">
+          </div>
+          <div class="mgmt-list" id="mcpList"><div class="empty-msg">暂无 MCP 配置</div></div>
+        </div>
       </div>
+    </section>
+
+    <section class="panel pix">
+      <div class="panel-head">
+        <h2>▸ Agent 管理</h2>
+        <span class="sub" id="agentSummary">加载中…</span>
+      </div>
+      <div class="panel-body">
+        <div class="mgmt-row">
+          <button class="mgmt-btn" id="addAgentBtn" type="button">＋ 注册 Agent</button>
+        </div>
+        <div class="mgmt-list" id="agentList"><div class="empty-msg">加载中…</div></div>
+      </div>
+    </section>
+
+    <section class="panel pix" id="sessionChainPanel" style="display:none">
+      <div class="panel-head">
+        <h2>▸ 会话链</h2>
+        <span class="sub" id="sessionChainSummary"></span>
+      </div>
+      <div class="panel-body" id="sessionChainBody"></div>
     </section>
 
     <section class="panel runs-panel pix">
@@ -893,6 +996,74 @@ tr.run-row:hover{background:var(--bg-2)}
   </div>
 </div>
 
+<div class="interrupt-modal" id="interruptModal" style="display:none">
+  <div class="modal-box">
+    <h3>已有任务运行中</h3>
+    <p>当前有协同任务正在运行。请选择：</p>
+    <div class="modal-btns">
+      <button id="intrQueue">排队等待</button>
+      <button id="intrInterrupt" class="btn-danger">中断当前并提交</button>
+      <button id="intrCancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="skillModal" style="display:none">
+  <div class="modal-box">
+    <h3>添加技能</h3>
+    <label>名称<input id="skillName" placeholder="my-skill"></label>
+    <label>显示名<input id="skillDisplayName" placeholder="我的技能"></label>
+    <label>分类<input id="skillCategory" value="custom"></label>
+    <label>描述<input id="skillDescription" placeholder="技能描述"></label>
+    <label>适用能力<input id="skillCapabilities" value="*" placeholder="逗号分隔"></label>
+    <label>优先级<input id="skillPriority" type="number" value="2" min="1" max="5"></label>
+    <label>内容 (Markdown)<textarea id="skillContent" rows="4" placeholder="技能的详细内容..."></textarea></label>
+    <div class="modal-btns">
+      <button id="skillModalSubmit">确认添加</button>
+      <button id="skillModalCancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="mcpModal" style="display:none">
+  <div class="modal-box">
+    <h3>添加 MCP 工具</h3>
+    <label>名称<input id="mcpName" placeholder="my-mcp-tool"></label>
+    <label>服务器名<input id="mcpServerName" placeholder="server-name"></label>
+    <label>工具名<input id="mcpToolName" placeholder="tool-name"></label>
+    <label>端点/命令<input id="mcpEndpoint" placeholder="npx @example/mcp-server"></label>
+    <label>允许工具 (逗号分隔)<input id="mcpAllowedTools" placeholder="tool1,tool2"></label>
+    <label>适用能力<input id="mcpCapabilities" value="*" placeholder="逗号分隔"></label>
+    <label>优先级<input id="mcpPriority" type="number" value="2" min="1" max="5"></label>
+    <div class="modal-btns">
+      <button id="mcpModalSubmit">确认添加</button>
+      <button id="mcpModalCancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="agentModal" style="display:none">
+  <div class="modal-box">
+    <h3>注册 Agent 后端</h3>
+    <label>名称 (唯一标识)<input id="agentName" placeholder="my-agent" pattern="[a-z0-9_-]+" minlength="2" maxlength="32" required></label>
+    <label>显示名称<input id="agentDisplayName" placeholder="我的 Agent"></label>
+    <label>命令 (空格分隔)<input id="agentCommand" placeholder="claude" required></label>
+    <label>输出解析器
+      <select id="agentOutputParser">
+        <option value="raw_text">raw_text</option>
+        <option value="claude_json">claude_json</option>
+        <option value="codex_json">codex_json</option>
+      </select>
+    </label>
+    <label>提示前缀<input id="agentPromptPrefix" placeholder="You are a worker in..."></label>
+    <label>能力标签 (逗号分隔，至少 1 个)<input id="agentCapabilities" placeholder="file-edit,git-ops,test-run" required></label>
+    <div class="modal-btns">
+      <button id="agentModalSubmit">确认注册</button>
+      <button id="agentModalCancel">取消</button>
+    </div>
+  </div>
+</div>
+
 <script>
 'use strict';
 /* =========================================================
@@ -917,7 +1088,11 @@ const state={
   refreshInFlight:null,
   fullRefreshPending:false,
   lastRunsSig:'',
-  lastRunDetailSig:''
+  lastRunDetailSig:'',
+  resumeContext:null,
+  resumeEnabled:false,
+  pendingAuth:null,
+  taskQueue:[]
 };
 
 /* ---------- palette + sprite tables ---------- */
@@ -1355,7 +1530,7 @@ function renderRuns(){
   el.innerHTML=`<table class="runs-table"><thead><tr><th>编号</th><th>状态</th><th>标题</th><th style="width:48px">总结</th></tr></thead><tbody>${filtered.slice(0,12).map(r=>{
     const canDiary=['completed','failed'].includes(r.status);
     const diaryBtn=canDiary?`<button class="diary-trigger" data-diary="${esc(r.id)}" title="查看 Leader 总结">📓</button>`:'<span style="color:var(--ink-3);font-size:11px">—</span>';
-    return`<tr class="run-row"><td><a href="#" class="link" data-run="${esc(r.id)}">${esc(String(r.id).slice(0,10))}</a></td><td>${statusTag(r.status)}</td><td>${esc(r.title||'—')}</td><td>${diaryBtn}</td></tr>`;
+    return`<tr class="run-row"><td><a href="#" class="link" data-run="${esc(r.id)}">${esc(String(r.id).slice(0,10))}</a></td><td style="min-width:80px">${statusTag(r.status)}</td><td><span class="run-title" title="${esc(r.title||'—')}">${esc(r.title||'—')}</span></td><td>${diaryBtn}</td></tr>`;
   }).join('')}</tbody></table>`;
   el.querySelectorAll('[data-run]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();showRunDetail(a.dataset.run)}));
   el.querySelectorAll('[data-diary]').forEach(b=>b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();showDiaryFor(b.dataset.diary)}));
@@ -1376,7 +1551,7 @@ function runDetailSignature(detail){
 }
 function clearRunView(){
   state.nodes=[];state.agents=[];state.logs=[];state.lastRunDetailSig='';
-  renderNodeList();summarizePipeline();renderLogPanel();
+  renderNodeList();summarizePipeline();renderLogPanel();renderSessionChains();
 }
 async function refresh(options={}){
   if(state.refreshInFlight){
@@ -1406,6 +1581,10 @@ async function refresh(options={}){
     state.fullRefreshPending=false;
     return refresh({full:true});
   }
+  /* auto-process queue when no run is active */
+  if(!runBusy&&state.taskQueue.length&&!state.runs.find(r=>r.status==='running'))processQueue();
+  /* refresh session chains */
+  renderSessionChains();
 }
 async function loadRun(runId){
   const detail=await getJSON('/api/runs/'+encodeURIComponent(runId));if(!detail)return;
@@ -1416,38 +1595,6 @@ async function loadRun(runId){
   state.nodes=(detail.nodes||[]).map(normalizeNode);state.logs=detail.logs||[];
   state.agents=makeAgents(state.nodes);
   renderNodeList();summarizePipeline();renderLogPanel();
-}
-
-/* ---------- run submit ---------- */
-let runBusy=false,runToastTimer=null;
-function showRunToast(kind,msg){
-  const el=$('runToast');clearTimeout(runToastTimer);
-  el.classList.remove('ok','bad');if(kind)el.classList.add(kind);
-  el.textContent=msg||'';
-  if(msg)runToastTimer=setTimeout(()=>{el.classList.remove('ok','bad');el.textContent=''},3000);
-}
-function syncRunInput(){
-  const ta=$('runRequest'),btn=$('runBtn'),cs=getComputedStyle(ta);
-  ta.style.height='auto';
-  const max=(parseFloat(cs.lineHeight)||24)*8+parseFloat(cs.paddingTop)+parseFloat(cs.paddingBottom);
-  ta.style.height=Math.min(ta.scrollHeight,max)+'px';
-  btn.disabled=runBusy||!ta.value.trim();
-}
-async function submitRun(e){
-  e.preventDefault();
-  const ta=$('runRequest'),btn=$('runBtn'),request=ta.value.trim();
-  if(!request){showRunToast('bad','请输入任务描述');syncRunInput();ta.focus();return}
-  runBusy=true;btn.textContent='提交中…';syncRunInput();
-  try{
-    const payload={request};
-    const data=await postJSON('/api/runs',payload);
-    ta.value='';await refresh();
-    showRunToast('ok','✓ '+(data.run_id||data.id||'任务已提交'));
-  }catch(err){
-    showRunToast('bad','✗ 提交失败：'+(err.message||'未知错误'));
-  }finally{
-    runBusy=false;btn.textContent='► 提交协同任务';syncRunInput();
-  }
 }
 
 /* ---------- preview ---------- */
@@ -1677,12 +1824,17 @@ async function showNode(runId,nodeId){
   if(node.description)html+=`<p><strong>描述</strong>${esc(node.description)}</p>`;
   if(node.result)html+=`<h3>结果</h3><pre>${esc(node.result)}</pre>`;
   const nodeLogs=logs.filter(l=>l.node_id===nodeId);
-  const skillLog=nodeLogs.find(l=>l.message==='worker skills selected');
-  const toolLog=nodeLogs.find(l=>l.message==='worker tool profiles selected');
-  if(skillLog||toolLog){
+  // Read skills/tools from Leader-allocated node fields (not per-worker logs)
+  const nodeSkills=node.skills_json?(()=>{
+    try{return JSON.parse(node.skills_json)}catch(e){return []}
+  })():[];
+  const nodeTools=node.tools_json?(()=>{
+    try{return JSON.parse(node.tools_json)}catch(e){return []}
+  })():[];
+  if(nodeSkills.length||nodeTools.length){
     html+='<h3>技能与工具</h3><div class="badges">';
-    if(skillLog?.data?.skills)skillLog.data.skills.forEach(s=>html+=`<span class="badge skill">⌬ ${esc(s)}</span>`);
-    if(toolLog?.data?.profiles)toolLog.data.profiles.forEach(p=>html+=`<span class="badge tool">⚒ ${esc(p)}</span>`);
+    nodeSkills.forEach(s=>html+=`<span class="badge skill">⌬ ${esc(s)}</span>`);
+    nodeTools.forEach(p=>html+=`<span class="badge tool">⚒ ${esc(p)}</span>`);
     html+='</div>';
   }
   $('detailContent').innerHTML=html||'<div class="empty-msg">no details</div>';
@@ -1759,8 +1911,277 @@ function tickClock(){
 }
 setInterval(tickClock,1000);tickClock();
 
-/* ---------- wire up ---------- */
+/* ---------- interrupt modal ---------- */
+let _intrResolve=null;
+function showInterruptModal(){
+  $('interruptModal').style.display='flex';
+  return new Promise(resolve=>{_intrResolve=resolve});
+}
+function closeInterruptModal(choice){
+  $('interruptModal').style.display='none';
+  if(_intrResolve){_intrResolve(choice);_intrResolve=null}
+}
+$('intrQueue').addEventListener('click',()=>closeInterruptModal('queue'));
+$('intrInterrupt').addEventListener('click',()=>closeInterruptModal('interrupt'));
+$('intrCancel').addEventListener('click',()=>closeInterruptModal('cancel'));
+
+/* ---------- task queue ---------- */
+function renderTaskQueue(){
+  const el=$('taskQueue');
+  if(!state.taskQueue.length){el.style.display='none';el.innerHTML='';return}
+  el.style.display='block';
+  el.innerHTML=state.taskQueue.map((q,i)=>`<div class="q-item"><span class="q-num">#${i+1}</span><span class="q-text">${esc(q.request.slice(0,80))}${q.request.length>80?'…':''}</span><button class="q-del" data-qi="${i}" title="移除">✕</button></div>`).join('');
+  el.querySelectorAll('.q-del').forEach(b=>b.addEventListener('click',()=>{state.taskQueue.splice(Number(b.dataset.qi),1);renderTaskQueue()}));
+}
+async function processQueue(){
+  if(runBusy||!state.taskQueue.length)return;
+  const item=state.taskQueue.shift();renderTaskQueue();
+  await doSubmitRun(item.request,item);
+}
+
+/* ---------- resume session ---------- */
+function confirmDefaultAllow(message,seconds=5){
+  const overlay=$('interruptModal');
+  // reuse interrupt modal for confirm
+  return new Promise(resolve=>{
+    const orig=overlay.innerHTML;
+    overlay.style.display='flex';
+    overlay.querySelector('.modal-box').innerHTML=`<h3>确认接入</h3><p>${esc(message)}</p><div class="modal-btns"><button id="_cfOk">确认</button><button id="_cfNo">取消</button></div>`;
+    overlay.querySelector('#_cfOk').onclick=()=>{overlay.style.display='none';overlay.innerHTML=orig;resolve(true)};
+    overlay.querySelector('#_cfNo').onclick=()=>{overlay.style.display='none';overlay.innerHTML=orig;resolve(false)};
+  });
+}
+async function enableResume(){
+  const btn=$('resumeBtn');btn.disabled=true;
+  try{
+    const resp=await fetch('/api/resume-context');
+    if(resp.status===404){showRunToast('bad','暂无历史会话');return}
+    if(!resp.ok)throw new Error(`HTTP ${resp.status}`);
+    const ctx=await resp.json();
+    if(ctx.error){showRunToast('bad','暂无历史会话');return}
+    const ok=await confirmDefaultAllow(`接入 ${ctx.run.title||ctx.run.id} 的摘要与最近交互（约 ${ctx.estimated_tokens} tokens）`);
+    if(!ok){showRunToast('bad','已取消接入上次会话');return}
+    state.resumeContext=ctx;state.resumeEnabled=true;btn.classList.add('active');
+    btn.textContent='✓ 已接入上次会话';showRunToast('ok',`已接入：${ctx.run.id}`);
+    const ta=$('runRequest');if(ta&&!ta.value.trim()){const req=ctx.run.request||'';ta.value=req.length>200?req.slice(0,200)+'…':req}
+  }catch(err){showRunToast('bad','✗ 无法接入：'+(err.message||'无历史会话'))}
+  finally{btn.disabled=false}
+}
+function clearResumeState(){state.resumeContext=null;state.resumeEnabled=false;const btn=$('resumeBtn');btn.classList.remove('active');btn.textContent='↩ 接入上次会话'}
+$('resumeBtn').addEventListener('click',enableResume);
+
+/* mutual-disable: hover one disables the other */
+const _resumeBtn=$('resumeBtn'),_runBtn=$('runBtn');
+_resumeBtn.addEventListener('mouseenter',()=>{if(!_resumeBtn.disabled)_runBtn.disabled=true});
+_resumeBtn.addEventListener('mouseleave',()=>{syncRunInput()});
+_runBtn.addEventListener('mouseenter',()=>{if(!_runBtn.disabled)_resumeBtn.disabled=true});
+_runBtn.addEventListener('mouseleave',()=>{if(!state.resumeEnabled)_resumeBtn.disabled=false});
+
+/* ---------- submit run (with queue support) ---------- */
+let runBusy=false,runToastTimer=null;
+function showRunToast(kind,msg){const el=$('runToast');clearTimeout(runToastTimer);el.classList.remove('ok','bad');if(kind)el.classList.add(kind);el.textContent=msg||'';if(msg)runToastTimer=setTimeout(()=>{el.classList.remove('ok','bad');el.textContent=''},3000)}
+function syncRunInput(){const ta=$('runRequest'),btn=$('runBtn'),cs=getComputedStyle(ta);ta.style.height='auto';const max=(parseFloat(cs.lineHeight)||24)*8+parseFloat(cs.paddingTop)+parseFloat(cs.paddingBottom);ta.style.height=Math.min(ta.scrollHeight,max)+'px';btn.disabled=runBusy||!ta.value.trim()}
+async function submitRun(e){
+  e.preventDefault();
+  const ta=$('runRequest'),btn=$('runBtn'),request=ta.value.trim();
+  if(!request){showRunToast('bad','请输入任务描述');syncRunInput();ta.focus();return}
+  const resumePayload=state.resumeEnabled&&state.resumeContext?{resume:true,resume_run_id:state.resumeContext.run.id}:{};
+  try{
+    const overview=await getJSON('/api/overview');
+    if(overview.running>0){
+      const choice=await showInterruptModal();
+      if(choice==='cancel')return;
+      if(choice==='queue'){
+        if(state.taskQueue.length>=5){showRunToast('bad','队列已满（最多 5 个）');return}
+        state.taskQueue.push({request,...resumePayload});renderTaskQueue();
+        ta.value='';clearResumeState();showRunToast('ok',`已加入队列 #${state.taskQueue.length}`);return
+      }
+      if(choice==='interrupt'){
+        const runs=await getJSON('/api/runs');
+        const running=runs.find(r=>r.status==='running');
+        if(running){await fetch(`/api/runs/${running.id}/interrupt`,{method:'POST'})}
+      }
+    }
+  }catch(e){}
+  await doSubmitRun(request,resumePayload);
+  ta.value='';clearResumeState();
+}
+async function doSubmitRun(request,extra={}){
+  runBusy=true;syncRunInput();$('runBtn').disabled=true;
+  try{
+    await postJSON('/api/runs',{request,...extra});
+    showRunToast('ok','✓ 任务已提交');refresh({full:true});
+  }catch(err){showRunToast('bad','✗ '+err.message)}
+  finally{runBusy=false;syncRunInput()}
+}
 $('runForm').addEventListener('submit',submitRun);
+
+/* ---------- task set tracking ---------- */
+/* ---------- session chains (conversation management) ---------- */
+async function renderSessionChains(){
+  const panel=$('sessionChainPanel'),body=$('sessionChainBody'),sum=$('sessionChainSummary');
+  if(!panel||!body)return;
+  try{
+    const chains=await getJSON('/api/session-chains');
+    if(!chains||!chains.length){panel.style.display='none';return}
+    panel.style.display='';
+    sum.textContent=`${chains.length} 条对话链`;
+    body.innerHTML=chains.map((chain,ci)=>{
+      const runsHtml=chain.runs.map((r,j)=>{
+        const statusCls=r.status==='completed'?'ok':r.status==='running'?'run':r.status==='failed'?'bad':'wait';
+        const progress=r.node_count?`${r.completed_nodes}/${r.node_count}`:'';
+        return`<div style="display:flex;align-items:center;gap:6px;padding:3px 0;${j>0?'border-top:1px dashed var(--line);':''}">
+          <span style="color:var(--ink-3);font-size:11px;min-width:16px">${j+1}.</span>
+          <a href="#" class="link" data-run="${esc(r.id)}" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px">${esc(r.title||r.id)}</a>
+          <span class="badge ${statusCls}" style="font-size:10px">${esc(r.status)}</span>
+          ${progress?`<span style="color:var(--ink-3);font-size:11px">${progress}</span>`:''}
+        </div>`;
+      }).join('');
+      return`<div style="margin-bottom:10px"><div style="color:var(--gold);font-size:12px;margin-bottom:4px">🔗 对话链 #${ci+1} · ${chain.count} 个任务</div>${runsHtml}</div>`;
+    }).join('');
+    body.querySelectorAll('[data-run]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();showRunDetail(a.dataset.run)}));
+  }catch(e){panel.style.display='none'}
+}
+
+/* ---------- skill/MCP management modals ---------- */
+function openSkillModal(){$('skillModal').style.display='flex'}
+function closeSkillModal(){$('skillModal').style.display='none'}
+function openMcpModal(){$('mcpModal').style.display='flex'}
+function closeMcpModal(){$('mcpModal').style.display='none'}
+$('addSkillBtn').addEventListener('click',openSkillModal);
+$('skillModalCancel').addEventListener('click',closeSkillModal);
+$('addMcpBtn').addEventListener('click',openMcpModal);
+$('mcpModalCancel').addEventListener('click',closeMcpModal);
+
+$('skillModalSubmit').addEventListener('click',async()=>{
+  const name=$('skillName').value.trim();
+  if(!name){showRunToast('bad','请输入技能名称');return}
+  const payload={
+    name,
+    display_name:$('skillDisplayName').value.trim()||name,
+    category:$('skillCategory').value.trim()||'custom',
+    description:$('skillDescription').value.trim(),
+    capabilities:$('skillCapabilities').value.split(',').map(s=>s.trim()).filter(Boolean),
+    priority:parseInt($('skillPriority').value)||2,
+    content:$('skillContent').value,
+    type:'skill'
+  };
+  try{await postJSON('/api/registry',payload);showRunToast('ok','✓ 技能已添加：'+name);closeSkillModal();['skillName','skillDisplayName','skillDescription','skillContent'].forEach(id=>$(id).value='');$('skillCapabilities').value='*';$('skillPriority').value='2';loadRegistryLists()}
+  catch(e){showRunToast('bad','✗ 添加失败：'+(e.message||'未知错误'))}
+});
+
+$('mcpModalSubmit').addEventListener('click',async()=>{
+  const name=$('mcpName').value.trim();
+  if(!name){showRunToast('bad','请输入 MCP 名称');return}
+  const payload={
+    name,
+    server_name:$('mcpServerName').value.trim()||name,
+    tool_name:$('mcpToolName').value.trim(),
+    endpoint:$('mcpEndpoint').value.trim(),
+    allowed_tools:$('mcpAllowedTools').value.split(',').map(s=>s.trim()).filter(Boolean),
+    capabilities:$('mcpCapabilities').value.split(',').map(s=>s.trim()).filter(Boolean),
+    priority:parseInt($('mcpPriority').value)||2,
+    type:'mcp'
+  };
+  try{await postJSON('/api/registry',payload);showRunToast('ok','✓ MCP 已添加：'+name);closeMcpModal();['mcpName','mcpServerName','mcpToolName','mcpEndpoint','mcpAllowedTools','mcpCapabilities'].forEach(id=>$(id).value='');$('mcpPriority').value='2';loadRegistryLists()}
+  catch(e){showRunToast('bad','✗ 添加失败：'+(e.message||'未知错误'))}
+});
+
+// File uploads
+$('uploadSkillBtn').addEventListener('click',()=>$('skillFileInput').click());
+$('skillFileInput').addEventListener('change',async(e)=>{
+  const file=e.target.files[0];if(!file)return;
+  const text=await file.text();
+  const name=file.name.replace(/\.(md|txt|yaml|yml)$/,'').replace(/[^a-z0-9_-]/gi,'_');
+  try{await postJSON('/api/registry',{name,display_name:file.name,category:'imported',description:'从文件导入：'+file.name,capabilities:['*'],priority:3,content:text,type:'skill'});showRunToast('ok','✓ 技能文件已导入：'+file.name);loadRegistryLists()}
+  catch(err){showRunToast('bad','✗ 导入失败：'+(err.message||'未知错误'))}
+  e.target.value='';
+});
+
+$('uploadMcpBtn').addEventListener('click',()=>$('mcpFileInput').click());
+$('mcpFileInput').addEventListener('change',async(e)=>{
+  const file=e.target.files[0];if(!file)return;
+  try{
+    const text=await file.text();const data=JSON.parse(text);
+    const servers=data.mcpServers||data;let count=0;
+    for(const[serverName,serverCfg]of Object.entries(servers)){
+      const tools=serverCfg.tools||[];
+      if(tools.length){for(const tool of tools){await postJSON('/api/registry',{name:`${serverName}_${tool.name||serverName}`,server_name:serverName,tool_name:tool.name||serverName,endpoint:serverCfg.command||'',allowed_tools:[`mcp__${serverName}__${tool.name||serverName}`],capabilities:['*'],priority:2,type:'mcp'});count++}}
+      else{await postJSON('/api/registry',{name:serverName,server_name:serverName,tool_name:'',endpoint:serverCfg.command||'',allowed_tools:[],capabilities:['*'],priority:2,type:'mcp'});count++}
+    }
+    showRunToast('ok',`✓ 已导入 ${count} 个 MCP 工具`);loadRegistryLists()
+  }catch(err){showRunToast('bad','✗ 导入失败：'+(err.message||'请确认 JSON 格式'))}
+  e.target.value='';
+});
+
+async function loadRegistryLists(){
+  try{
+    const data=await getJSON('/api/registry');
+    const skillList=$('skillList');const skills=data.skills||[];
+    if(!skills.length){skillList.innerHTML='<div class="empty-msg">暂无自定义技能</div>'}
+    else{skillList.innerHTML=skills.map(s=>`<div class="mgmt-list-item"><span class="item-name">${esc(s.display_name||s.name)}</span><span class="item-cat">${esc(s.category||'')}</span><span class="badge skill">p${esc(s.priority)}</span></div>`).join('')}
+    const mcpList=$('mcpList');const mcps=data.mcp||[];
+    if(!mcps.length){mcpList.innerHTML='<div class="empty-msg">暂无 MCP 配置</div>'}
+    else{mcpList.innerHTML=mcps.map(m=>`<div class="mgmt-list-item"><span class="item-name">${esc(m.display_name||m.name)}</span><span class="item-cat">${esc(m.server_name||'')}</span><span class="badge tool">p${esc(m.priority)}</span></div>`).join('')}
+  }catch(e){console.warn('registry load',e)}
+}
+
+/* ---------- agent management ---------- */
+function openAgentModal(){$('agentModal').style.display='flex'}
+function closeAgentModal(){$('agentModal').style.display='none'}
+$('addAgentBtn').addEventListener('click',openAgentModal);
+$('agentModalCancel').addEventListener('click',closeAgentModal);
+
+$('agentModalSubmit').addEventListener('click',async()=>{
+  const name=$('agentName').value.trim();
+  if(!name||!/^[a-z0-9_-]{2,32}$/.test(name)){showRunToast('bad','名称必填，只允许 [a-z0-9_-]，长度 2-32');return}
+  const cmd=$('agentCommand').value.trim();
+  if(!cmd){showRunToast('bad','命令必填');return}
+  const caps=$('agentCapabilities').value.split(',').map(s=>s.trim()).filter(Boolean);
+  if(!caps.length){showRunToast('bad','能力标签至少填 1 个');return}
+  for(const c of caps){if(!/^[a-z_-]+$/.test(c)){showRunToast('bad',`能力格式不合法: ${c}`);return}}
+  const payload={
+    name,
+    display_name:$('agentDisplayName').value.trim()||name,
+    command:cmd.split(/\s+/).filter(Boolean),
+    output_parser:$('agentOutputParser').value,
+    prompt_prefix:$('agentPromptPrefix').value.trim(),
+    capabilities:caps,
+  };
+  try{await postJSON('/api/agents',payload);showRunToast('ok','✓ Agent 已注册：'+name);closeAgentModal();['agentName','agentDisplayName','agentCommand','agentPromptPrefix','agentCapabilities'].forEach(id=>$(id).value='');$('agentOutputParser').value='raw_text';loadAgentList()}
+  catch(e){showRunToast('bad','✗ 注册失败：'+(e.message||'未知错误'))}
+});
+
+async function loadAgentList(){
+  try{
+    const agents=await getJSON('/api/agents');
+    const el=$('agentList');const sum=$('agentSummary');
+    sum.textContent=`${agents.length} 个后端`;
+    if(!agents.length){el.innerHTML='<div class="empty-msg">暂无已注册 Agent</div>';return}
+    el.innerHTML=agents.map(a=>{
+      const isHermes=a.name==='hermes'||a.source==='hermes'||a.source==='builtin';
+      let statusBadge;
+      if(a.is_available===false){
+        statusBadge='<span class="badge warn">未就绪</span>';
+      }else{
+        statusBadge=isHermes?'<span class="badge ok">内置</span>':'<span class="badge ok">启用中</span>';
+      }
+      const parser=a.output_parser?`<span class="item-cat">${esc(a.output_parser)}</span>`:'';
+      const caps=(a.capabilities||[]).map(c=>`<span class="badge skill" style="font-size:10px">${esc(c)}</span>`).join('');
+      return`<div class="mgmt-list-item"><span class="item-name">${esc(a.display_name||a.name)}</span>${parser}${statusBadge}</div>${caps?'<div style="display:flex;gap:3px;flex-wrap:wrap;padding:0 6px 4px">'+caps+'</div>':''}`;
+    }).join('');
+  }catch(e){console.warn('agent load',e)}
+}
+
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){
+    if($('skillModal').style.display==='flex')closeSkillModal();
+    if($('mcpModal').style.display==='flex')closeMcpModal();
+    if($('agentModal').style.display==='flex')closeAgentModal();
+  }
+});
+
+/* ---------- wire up ---------- */
 $('runRequest').addEventListener('input',syncRunInput);
 $('runRequest').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')$('runForm').requestSubmit()});
 syncRunInput();
@@ -1772,7 +2193,7 @@ wireLogChips();
 wireDiary();
 
 /* ---------- boot ---------- */
-loadConfig();refresh();previewCapabilities();
+loadConfig();refresh();previewCapabilities();loadRegistryLists();loadAgentList();
 requestAnimationFrame(render);
 requestAnimationFrame(processHover);
 

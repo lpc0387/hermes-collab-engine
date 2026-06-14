@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from src.hermes_collab_engine.models import WBSNode
 from src.hermes_collab_engine.planner import Planner
+
+
+def planner_node(node_id: str, title: str, capability: str, dependencies: list[str]) -> WBSNode:
+    return WBSNode(node_id, title, title, capability, 5, dependencies, True, title)
 
 
 class PlannerFallbackTests(unittest.TestCase):
@@ -47,6 +52,30 @@ class PlannerFallbackTests(unittest.TestCase):
             self.assertIn("x" * 1500, node.description)
             self.assertIn("…", node.description)
             self.assertNotIn(request, node.description)
+
+    def test_decompose_single_routing_uses_local_template_without_llm(self) -> None:
+        planner = Planner(cwd=Path("."))
+        planner._claude_json = lambda _prompt: self.fail("single routing should not call leader model")
+
+        plan = planner.decompose("实现一个小的 README 更新")
+
+        self.assertEqual([n.id for n in plan.nodes], ["wbs-1", "wbs-2", "wbs-verify"])
+        self.assertEqual([n.capability for n in plan.nodes], ["analysis", "implementation", "verification"])
+
+    def test_deduplicate_nodes_merges_duplicate_fingerprints_and_rewrites_dependencies(self) -> None:
+        planner = Planner(cwd=Path("."))
+        nodes = [
+            planner_node("wbs-1", "Analyze", "analysis", []),
+            planner_node("wbs-2", "Implement dedup", "implementation", ["wbs-1"]),
+            planner_node("wbs-3", "Implement dedup", "implementation", ["wbs-1"]),
+            planner_node("wbs-4", "Verify", "verification", ["wbs-3"]),
+        ]
+
+        unique = planner._deduplicate_nodes(nodes)
+
+        self.assertEqual([n.id for n in unique], ["wbs-1", "wbs-2", "wbs-4"])
+        self.assertEqual(unique[-1].dependencies, ["wbs-2"])
+        self.assertTrue(unique[1].fingerprint)
 
 
 if __name__ == "__main__":
