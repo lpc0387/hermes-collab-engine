@@ -1,6 +1,8 @@
-# Hermes Collab Engine v5.5
+# Hermes Collab Engine v5.5 — Multi-Agent AI Collaboration Engine
 
-[![Release v5.5.0](https://img.shields.io/badge/release-v5.5.0-blue)](CHANGELOG.md) [![Sandbox ready](https://img.shields.io/badge/sandbox-ready-success)](sandbox/README.md) [![License MIT](https://img.shields.io/badge/license-MIT-green)](#许可证) [![Security](https://img.shields.io/badge/security-policy-orange)](SECURITY.md)
+[![English](https://img.shields.io/badge/English-README.en.md-blue)](README.en.md) [![Release v5.5.0](https://img.shields.io/badge/release-v5.5.0-blue)](CHANGELOG.md) [![Sandbox ready](https://img.shields.io/badge/sandbox-ready-success)](sandbox/README.md) [![License MIT](https://img.shields.io/badge/license-MIT-green)](#许可证) [![Security](https://img.shields.io/badge/security-policy-orange)](SECURITY.md)
+
+> Open-source multi-agent orchestration for Claude Code, Hermes, Codex & custom AI agents — plan, split, dispatch, supervise, aggregate.
 
 Hermes Collab Engine v5.5 是面向 **Hermes 协同引擎** 的首个正式公开发布版 **AI multi-agent collaboration engine**：Leader 把需求拆成 WBS，Worker 并行执行，Claude Code / Hermes Agent / 自定义 Agent Backend 可接入同一条协作流水线。
 
@@ -281,6 +283,8 @@ src/hermes_collab_engine/
 web/
 └── index.html       # 可视化面板
 ```
+
+> **GitHub Topics 推荐：** `multi-agent`, `claude-code`, `ai-orchestration`, `wbs`, `llm`, `agentic-ai` — 建议在仓库 Settings → Topics 中添加。
 
 ## 联系与支持
 

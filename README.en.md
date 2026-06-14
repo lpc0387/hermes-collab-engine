@@ -1,105 +1,154 @@
-# Hermes Collab Engine v5.0
+# Hermes Collab Engine v5.5 — Multi-Agent AI Collaboration Engine
 
-[![Release v5.0.0](https://img.shields.io/badge/release-v5.0.0-blue)](CHANGELOG.md) [![Sandbox ready](https://img.shields.io/badge/sandbox-ready-success)](sandbox/README.md) [![License MIT](https://img.shields.io/badge/license-MIT-green)](#license) [![Security](https://img.shields.io/badge/security-policy-orange)](SECURITY.md)
+[![中文](https://img.shields.io/badge/中文-README.md-blue)](README.md) [![Release v5.5.0](https://img.shields.io/badge/release-v5.5.0-blue)](CHANGELOG.md) [![Sandbox ready](https://img.shields.io/badge/sandbox-ready-success)](sandbox/README.md) [![License MIT](https://img.shields.io/badge/license-MIT-green)](#license) [![Security](https://img.shields.io/badge/security-policy-orange)](SECURITY.md)
 
-Hermes Collab Engine v5.0 is the first formal public release of the **AI multi-agent collaboration engine** for the Hermes collaboration workflow: a Leader decomposes requests into **WBS** nodes, Workers run in parallel, and **Claude Code** / **Hermes Agent** / custom Agent Backends can join the same pipeline.
+> Open-source multi-agent orchestration for Claude Code, Hermes, Codex & custom AI agents — plan, split, dispatch, supervise, aggregate.
 
-It ships with a real-time **dashboard**, isolated **sandbox**, Leader feedback diary, lightweight API, and **one-line install** path for decomposing, dispatching, auditing, and summarizing complex engineering work.
+Hermes Collab Engine v5.5 is the first official public release of the **AI multi-agent collaboration engine** for the **Hermes collaboration engine**: the Leader breaks down requirements into a WBS, Workers execute in parallel, and Claude Code / Hermes Agent / custom Agent Backends can join the same collaboration pipeline.
 
-![Pixel Collab Office Dashboard](docs/screenshots/dashboard.png)
+It also provides a real-time **dashboard**, isolated **sandbox**, Leader feedback notebook, lightweight API, and one-line deployment — ideal for decomposing complex development tasks, dispatching, auditing, and aggregating results into readable deliverables.
 
-![Hermes collaboration flow demo](docs/demo/hermes-flow.svg)
+![Pixel Collaboration Workstation Dashboard](docs/screenshots/dashboard.png)
 
-## Release and community
+![Hermes Collaboration Flow Demo](docs/demo/hermes-flow.svg)
 
-If this project helps you, please star it on GitHub to follow the v5.0 release line. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before contributing, report security issues through [`SECURITY.md`](SECURITY.md), follow plans in [`ROADMAP.md`](ROADMAP.md), and review changes in [`CHANGELOG.md`](CHANGELOG.md). Optional community launch copy lives in [`docs/launch/v5.0-posts.md`](docs/launch/v5.0-posts.md).
+## Release & Community
 
-## One-line deployment
+If this project helps you, feel free to star and follow the v5.0 release line on GitHub. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before participating, report security issues via [`SECURITY.md`](SECURITY.md), check the roadmap in [`ROADMAP.md`](ROADMAP.md), and see version changes in [`CHANGELOG.md`](CHANGELOG.md). Community sharing copy can be found at [`docs/launch/v5.0-posts.md`](docs/launch/v5.0-posts.md).
+
+## One-Line Deployment
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lpc0387/hermes-collab-engine/main/scripts/install.sh | bash
 ```
 
-The installer checks dependencies, clones or updates the repository, creates a local virtual environment, and creates empty template directories. The repository **does not bundle runtime data, secrets, or real Hermes/Claude configuration**. To connect Hermes to the local engine, review the template installer first:
+The install script checks dependencies, clones/updates the repo, creates a local virtual environment, and creates empty template directories; the repo **does not bundle any runtime data, keys, or real Hermes/Claude configurations**. To connect Hermes to the local collaboration engine, please review the template script first:
 
 ```bash
 cd ~/hermes-collab-engine
 ./scripts/install-hermes-integration.sh --dry-run
 ```
 
-## Quick start
+## Quick Start
 
 ```bash
-# Launcher: choose config → choose Leader/Worker models → dashboard + Hermes CLI
+# Launch selector: choose config → choose Leader/Worker model → dashboard + Hermes CLI
 opc
 
-# Manual install
+# Manual installation
 python3 -m pip install -e .
 
 # Run a task directly
-hermes-collab run "Analyze the current project structure" --cwd . --json
+hermes-collab run "Analyze current project structure" --cwd . --json
 ```
 
 ## Highlights
 
-| Capability | Release note |
+| Capability | Release Notes |
 |---|---|
-| WBS collaboration | Leader scores, decomposes, and dispatches nodes; Workers execute in parallel by dependency |
-| Leader/Worker dual models | Pick separate Leader and Worker models at startup; the dashboard shows the active models |
-| Real sandbox execution | `scripts/start_sandbox.sh --real` can run real workers within a limited quota; mock demo remains the default |
-| Isolated DB / workspace | The sandbox uses demo SQLite; real mode writes `data/sandbox_real.sqlite3` and an isolated workspace, not production data |
-| TTL cleanup | The sandbox defaults to 2 hours and stops automatically to avoid long-lived demo processes |
-| Lightweight API payloads | Dashboard APIs return the necessary runs, nodes, Workers, logs, models, and feedback fields for embedding and proxying |
-| Leader feedback diary | After completion, a pixel notebook shows the full Leader aggregate feedback with copy/download Markdown actions |
-| one-line install | Use the `curl ... | bash` command above, then enable Hermes integration from reviewed templates if needed |
+| WBS Collaboration | Leader scores, decomposes, and dispatches nodes; Workers execute in parallel by dependency |
+| Leader/Worker Dual Models | Select Leader and Worker models at startup; dashboard displays current models |
+| Real Sandbox Execution | `scripts/start_sandbox.sh --real` launches real workers within limited quotas; default mode remains mock demo |
+| Isolated DB / Workspace | Sandbox uses demo SQLite; real execution writes to `data/sandbox_real.sqlite3` and an independent workspace, no read/write to production database |
+| TTL Cleanup | Sandbox defaults to 2 hours, auto-stops on expiry to prevent demo processes from lingering |
+| Lightweight API Payload | Dashboard API returns necessary fields for runs, nodes, Workers, and logs — easy to embed and proxy |
+| Leader Feedback Notebook | After task completion, a pixel notebook pops up displaying full Leader aggregation feedback, with copy/download Markdown support |
+| One-Line curl Deployment | Use `curl ... | bash` above to install; template scripts then connect Hermes as needed |
 
-## Sandbox demo
+## v5.5 Preview New Features
 
-The sandbox demonstrates the dashboard, run history, Worker state, model display, and Leader diary. It uses mock APIs and sanitized demo data, and **does not call real workers, write production data, or include real runtime data** by default.
+> v5.5 is a developer preview version with the following new features. Feedback is welcome.
 
-To try an online sandbox environment, contact the author on WeChat `lg19961117` to request access.
+### UnifiedRegistry
+- Unified management of Skills, Tools, and MCP with capability tag indexing
+- Web UI registration → auto-persisted, survives restarts
+- Leader auto-discovers available skills/tools and pre-assigns them during WBS phase
+
+### Agent Management
+- Built-in Agents (claude-code, hermes, codex, opencode)
+- Web UI registration of custom Agents with strict validation (name/command/capabilities)
+- Enable status display, capability tags
+
+### Session Chains
+- Form continuous conversation chains via "connect to previous session"
+- Group display of multiple run statuses and progress by resume chain
+- Dashboard auto-hides when no continuous conversations exist
+
+### Lessons Self-Learning System
+- Engine auto-records run experiences and deduplicates/refines them (run_id normalization)
+- Read-only node risk detection fix (no longer false-triggers checkpoint)
+- Atomic persistence of checkpoint state
+- `lessons_learned` field auto-output to run results
+
+### Skill/MCP Tool Injection
+- Leader pre-assigns skills and MCP tools for each node during WBS phase
+- Web UI supports file import registration (.md/.txt for skill, .json for MCP)
+- Tool whitelist (permission whitelist) not affected by native capability filtering
+
+### One-Click Sandbox Launch
+```bash
+sandbox              # Default 2 hours, port 8876
+sandbox 4            # Run 4 hours
+sandbox --port 8877  # Custom port
+```
+Sandbox is fully isolated from production (independent DB, workspace, port), synced with all v5.5 Web UI features.
+
+## Sandbox Demo
+
+The sandbox is used to demo the dashboard, run history, Worker status, model display, and Leader notebook. It uses mock API and desensitized demo data, **does not call real workers, does not write production data, and does not contain real runtime data**.
+
+To experience the sandbox environment online, contact the author via WeChat: `lg19961117` for access.
 
 ```bash
-# One-shot launcher (default: 2 hours, auto-stops on timeout)
+# One-click launch (default 2 hours, auto-stop on timeout)
 ./scripts/start_sandbox.sh
 
-# Custom duration
+# Custom hours
 ./scripts/start_sandbox.sh 4              # 4 hours
 ./scripts/start_sandbox.sh 0.5            # 30 minutes
 ./scripts/start_sandbox.sh --hours 8      # 8 hours
-./scripts/start_sandbox.sh --port 8877    # custom port
-./scripts/start_sandbox.sh -i             # ask interactively
+./scripts/start_sandbox.sh --port 8877    # Change port
+./scripts/start_sandbox.sh -i             # Interactive prompt for duration
 
-# Reuse an existing DB, or try real workers in an isolated DB/workspace
+# Reuse existing database without reseeding; or run real workers in isolated DB/workspace
 ./scripts/start_sandbox.sh --no-reseed
 ./scripts/start_sandbox.sh --real
 ```
 
-Then open: `http://127.0.0.1:8876/`. See [`sandbox/README.md`](sandbox/README.md).
+After launch, visit: `http://127.0.0.1:8876/`. See [`sandbox/README.md`](sandbox/README.md) for details.
 
-## Core concepts
-
-```text
-User → Leader(AI) → WBS Decomposition → Worker(AI) × N in parallel → Aggregation → Result
-```
-
-- **Leader**: complexity scoring, WBS decomposition, result aggregation, and Skill/Tool dispatch.
-- **Worker**: executes individual nodes and loads Skills plus tool whitelists as needed.
-- **Agent Backend**: abstracts Claude Code / Hermes Agent / Codex / OpenCode / custom coding agents.
-- **SQLite**: persists run state, node results, context snapshots, and lessons.
-- **Dashboard**: shows the pipeline, Worker pool, Skill/Tool injection, models, and logs in real time.
-
-## CLI commands
-
-### Run a task
+v5.5 adds the `sandbox` one-click launch command, alongside `opc`:
 
 ```bash
-hermes-collab run "Analyze the current project structure" --cwd . --json
-hermes-collab run --request-file request.md --cwd .
-hermes-collab run "Implement a collaborative task" --agent claude-code --concurrency 4 --timeout 900
+sandbox              # Default 2 hours, port 8876
+sandbox 4            # Run 4 hours
+sandbox --port 8877  # Custom port
+sandbox --real       # Enable real worker execution
 ```
 
-### Start the dashboard
+## Core Concepts
+
+```text
+User → Leader(AI) → WBS Decomposition → Worker(AI) × N Parallel → Aggregation → Result
+```
+
+- **Leader**: Complexity scoring, WBS decomposition, result aggregation, Skill/Tool dispatch.
+- **Worker**: Executes specific nodes, loads Skills and tool whitelists as needed.
+- **Agent Backend**: Abstraction for Claude Code / Codex / OpenCode / custom coding Agents.
+- **SQLite**: Persists run state, node results, context snapshots, and lessons.
+- **Dashboard**: Real-time display of pipeline, Worker pool, Skill/Tool injection, models, and logs.
+
+## CLI Commands
+
+### Run Tasks
+
+```bash
+hermes-collab run "Analyze current project structure" --cwd . --json
+hermes-collab run --request-file request.md --cwd .
+hermes-collab run "Implement collaboration task" --agent claude-code --concurrency 4 --timeout 900
+```
+
+### Launch Dashboard
 
 ```bash
 hermes-collab server --host 0.0.0.0 --port 8765 --cwd .
@@ -110,7 +159,7 @@ hermes-collab server --host 0.0.0.0 --port 8765 --cwd .
 ```bash
 hermes-collab skills                                # All skills
 hermes-collab skills --node-type implementation      # Preview selected skills
-hermes-collab tools                                 # All tool configurations
+hermes-collab tools                                 # All tool configs
 hermes-collab tools --node-type implementation       # Preview selected tools
 ```
 
@@ -122,7 +171,7 @@ hermes-collab agents --available    # Available on PATH
 hermes-collab status --json
 ```
 
-### Lesson management
+### Lessons Management
 
 ```bash
 hermes-collab lessons                       # List lessons
@@ -130,20 +179,20 @@ hermes-collab lessons --scope global        # Filter by scope
 hermes-collab add-lesson --category timeout --lesson "Split large files" --scope global
 ```
 
-### Runtime interventions
+### Runtime Intervention
 
 ```bash
-hermes-collab kill-node <run_id> <node_id>  # Kill a node
-hermes-collab split-node <run_id> <node_id> # Split a node
-hermes-collab skip-node <run_id> <node_id>  # Skip a node
-hermes-collab redo-node <run_id> <node_id>  # Redo a node
-hermes-collab log <run_id> <node_id> "msg"  # Write a log entry
+hermes-collab kill-node <run_id> <node_id>  # Kill node
+hermes-collab split-node <run_id> <node_id> # Split node
+hermes-collab skip-node <run_id> <node_id>  # Skip node
+hermes-collab redo-node <run_id> <node_id>  # Redo node
+hermes-collab log <run_id> <node_id> "msg"  # Write log
 ```
 
 ### Verification
 
 ```bash
-hermes-collab verify-release # v5.0 release completeness check
+hermes-collab verify-release # v5.0 release integrity check
 ```
 
 ## API
@@ -152,27 +201,27 @@ hermes-collab verify-release # v5.0 release completeness check
 |---|---|---|
 | GET | `/api/overview` | Overview data |
 | GET | `/api/runs` | Run records |
-| GET | `/api/runs/:id` | Compact run details with nodes and recent logs for fast dashboard refresh |
-| GET | `/api/runs/:id?full=1` | Full run details with Workers, complete logs, models, and Leader feedback |
+| GET | `/api/runs/:id` | Lightweight run details (nodes and recent logs, suitable for dashboard quick refresh) |
+| GET | `/api/runs/:id?full=1` | Full run details (including Workers, complete logs, models and Leader feedback) |
 | GET | `/api/logs` | Recent logs |
 | GET | `/api/lessons` | Self-learning lessons |
 | GET | `/api/agents` | Available Agent Backends |
-| GET | `/api/skills?node_type=&task=` | Skill registry with selection preview |
-| GET | `/api/tools?node_type=&task=` | Tool configuration with selection preview |
+| GET | `/api/skills?node_type=&task=` | Skill registry (preview selectable) |
+| GET | `/api/tools?node_type=&task=` | Tool configuration (preview selectable) |
 | GET | `/api/events` | SSE real-time event stream |
-| POST | `/api/runs` | Submit a task asynchronously |
+| POST | `/api/runs` | Async task submission |
 
-## Configuration sources
+## Configuration Sources
 
-The launcher auto-detects API configuration in this priority order:
+The launcher auto-detects API configuration in the following priority:
 
 1. **`~/.hermes/.env`** — `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` (recommended)
 2. **`~/.hermes/config.yaml`** — `model.base_url` + `model.default`
-3. **`~/.hermes/auth.json`** — Anthropic credentials from the credential pool
+3. **`~/.hermes/auth.json`** — anthropic credentials from credential pool
 4. **`~/.claude/settings.json`** — Claude Code configuration (fallback)
 5. **Manual input** — BaseURL + API Key + model list
 
-Hermes is the Leader, so its configuration should be the primary source. Claude Code configuration is only a compatibility fallback. The repository only provides empty skeletons and `.example` files, including `templates/claude/settings.example.json`; it does not read, copy, or publish real Hermes/Claude secrets, tokens, sessions, auth files, logs, sqlite data, skills, or memories.
+Hermes is the Leader, and its configuration should be the primary source. Claude Code configuration is only a compatibility fallback. The repo only provides empty templates and `.example` files, and does not read, copy, or publish real Hermes/Claude secrets, tokens, sessions, auth, logs, or sqlite data.
 
 Environment variables:
 
@@ -181,26 +230,36 @@ HERMES_COLLAB_MODEL=glm-5.1           # Global model
 HERMES_COLLAB_LEADER_MODEL=glm-5.1    # Leader model
 HERMES_COLLAB_WORKER_MODEL=kimi-k2.6  # Worker model
 ANTHROPIC_MODEL=glm-5.1               # Fallback
+
+# Optional: Worker git HTTPS credentials. Injected by runtime/secret manager, not written to repo.
+HERMES_COLLAB_WORKER_GIT_TOKEN=ghp_xxx
+HERMES_COLLAB_WORKER_GIT_USERNAME=x-access-token
+HERMES_COLLAB_WORKER_GIT_ALLOWED_HOSTS=github.com
+# Or provide an external helper (e.g. !/path/to/helper), takes precedence over built-in env-backed helper.
+HERMES_COLLAB_WORKER_GIT_CREDENTIAL_HELPER='!/path/to/git-credential-helper'
 ```
 
-## Persistence and security boundaries
+## Persistence & Security Boundary
 
-The SQLite file (default `data/collab.sqlite3`) stores runs, wbs_nodes, workers, logs, lessons, node_results, settings, and context_snapshots. API keys come only from environment variables or local configuration and are not written to the database.
+SQLite file (default `data/collab.sqlite3`) stores runs, wbs_nodes, workers, logs, lessons, node_results, settings, context_snapshots. API Keys come only from environment variables or local configuration, not written to the database.
 
-- Workers run in isolated subprocesses constrained by `allowed_tools` whitelists.
-- MCP tools are read-only by default (`mcp-readonly` profile).
-- The sandbox uses an isolated demo database and workspace, with TTL cleanup.
-- `git push` is restricted by the `git-write` tool profile and only available to implementation nodes.
+- Workers execute in independent subprocesses, constrained by `allowed_tools` whitelist.
+- MCP tools default to read-only (`mcp-readonly` profile).
+- Sandbox uses independent demo database and workspace, cleanable via TTL.
+- `git push` / `git clone` is restricted by `git-write` tool profile, only available to implementation nodes when the task explicitly requires git write/clone.
+- Worker git credentials are derived to subprocess environment via `HERMES_COLLAB_<ROLE>_GIT_TOKEN` and injected into in-memory credential helper using Git's `GIT_CONFIG_*`; the helper script only references environment variables and does not write tokens in plaintext to the repo or git config files. You can also use `HERMES_COLLAB_<ROLE>_GIT_CREDENTIAL_HELPER` to point to an external helper.
 
 ## Agent Backend
 
-| Backend | Command | Output parsing |
+| Backend | Command | Output Parsing |
 |---|---|---|
 | claude-code | `claude -p` | session ID + text |
 | codex | `codex` | JSON |
 | opencode | `opencode` | text |
 
-Custom Backend: implement the `AgentBackend` interface (`name`, `build_command`, `parse_output`, `default_allowed_tools`) and register it.
+Custom Backend: Implement the `AgentBackend` interface (`name`, `build_command`, `parse_output`, `default_allowed_tools`) and register it.
+
+v5.5 adds built-in Hermes Agent registration, supporting planning/orchestration/delegation capability tags.
 
 ## Development
 
@@ -216,23 +275,25 @@ src/hermes_collab_engine/
 ├── server.py        # Web dashboard
 ├── store.py         # SQLite persistence
 ├── models.py        # Data models
-├── skills.py        # Skill distribution
+├── skills.py        # Skill dispatch
 ├── tools.py         # MCP tool management
 ├── agents/          # Agent Backend abstraction
-├── verification.py  # v5.0 release completeness check
+├── verification.py  # v5.0 release integrity check
 └── ...
 web/
 └── index.html       # Visualization dashboard
 ```
 
-## Contact and support
+> **GitHub Topics Recommended:** `multi-agent`, `claude-code`, `ai-orchestration`, `wbs`, `llm`, `agentic-ai` — Suggested to add in repository Settings → Topics.
+
+## Contact & Support
 
 Primary contact: WeChat `lg19961117`
 
 <details>
-<summary>Optional sponsorship for project maintenance</summary>
+<summary>Optional sponsorship to support maintenance</summary>
 
-<img src="docs/assets/money.png" alt="Sponsor QR code" width="260">
+<img src="docs/assets/money.png" alt="Sponsorship QR code" width="260">
 
 </details>
 
