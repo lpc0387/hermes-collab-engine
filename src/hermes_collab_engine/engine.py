@@ -434,7 +434,7 @@ class CollabEngine:
         return timeout
 
     def _should_split_proactively(self, node: WBSNode, timeout: int, max_retries: int, split_count: int) -> bool:
-        if max_retries <= 0 or split_count <= 1 or not node.estimated_duration:
+        if split_count <= 1 or not node.estimated_duration:
             return False
         try:
             estimated_timeout = int(node.estimated_duration) * 2
@@ -462,7 +462,7 @@ class CollabEngine:
         results = [parent]
         if parent.ok:
             return results
-        if parent.returncode == 124 and max_retries > 0:
+        if parent.returncode == 124 and split_count > 1:
             self.store.log(run_id, "warning", "node timed out; splitting", {"node": node.id, "split_count": split_count}, node.id)
             shards = self._split_node(node, split_count)
             for shard in shards:

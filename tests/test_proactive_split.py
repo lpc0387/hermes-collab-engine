@@ -42,7 +42,8 @@ class ProactiveSplitTests(unittest.TestCase):
         self.assertFalse(self.engine._should_split_proactively(node, timeout=900, max_retries=1, split_count=2))
 
     def test_no_retry_or_single_split_count_disables_proactive_split(self) -> None:
-        self.assertFalse(self.engine._should_split_proactively(make_node(600), timeout=900, max_retries=0, split_count=2))
+        # max_retries no longer gates splitting; only split_count does
+        self.assertTrue(self.engine._should_split_proactively(make_node(600), timeout=900, max_retries=0, split_count=2))
         self.assertFalse(self.engine._should_split_proactively(make_node(600), timeout=900, max_retries=1, split_count=1))
 
     def test_runtime_duplicate_fingerprint_skips_second_worker(self) -> None:
