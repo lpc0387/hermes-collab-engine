@@ -4,6 +4,8 @@ import concurrent.futures
 import hashlib
 import json
 import fnmatch
+import queue
+import shutil
 import logging
 import os
 import re
@@ -47,6 +49,7 @@ class CollabEngine:
         agent: str = "opencode",
         leader_agent: str | None = "hermes",
         worker_agent: str | None = None,
+
         skill_registry: SkillRegistry | None = None,
         tool_registry: ToolRegistry | None = None,
         provider: Any = None,
@@ -66,10 +69,29 @@ class CollabEngine:
             skill_registry=self.skill_registry,
             tool_registry=self.tool_registry,
         )
-        self.store = CollabStore(db_path)
+        self.store = CollabStore(db_path, skip_cleanup=True)
         # Load agent profiles for leader/worker model overrides
         # Initialize unified registry with store for persistence
         get_unified_registry(store=self.store)
+        # Read stored model_config from DB and override
+        try:
+            _mc = self.store.get_setting("model_config") or {}
+            if _mc.get("leader_model"):
+                self.leader_model = _mc["leader_model"]
+            if _mc.get("worker_model"):
+                self.worker_model = _mc["worker_model"]
+            # Provider env vars (base_url / api_key)
+            if _mc.get("leader_base_url") or _mc.get("leader_api_key"):
+                from .provider import apply_provider_to_env, ProviderProfile
+                _p = ProviderProfile(
+                    name="leader-override",
+                    protocol="openai",
+                    base_url=_mc.get("leader_base_url") or "",
+                    api_key=_mc.get("leader_api_key") or "",
+                )
+                apply_provider_to_env(os.environ, _p)
+        except Exception:
+            pass
         self.planner = Planner(self.cwd, model=self.leader_model, store=self.store, skill_registry=self.skill_registry, tool_registry=self.tool_registry, leader_agent=self.leader_agent)
         self._node_results: dict[str, str] = {}
         self._node_results_struct: dict[str, dict[str, Any] | None] = {}
@@ -78,6 +100,7 @@ class CollabEngine:
         self._risk_assessments: list[dict[str, Any]] = []
         self._checkpoint_paused_nodes: set[str] = set()
         self._paused_runs: set[str] = set()
+        self._direct_mode: bool = False  # set by run() when score.routing=="direct"
         self._file_allowlist: set[str] = set()
         self._active_write_targets: dict[str, set[str]] = {}
         self._write_targets_lock = threading.Lock()
@@ -86,7 +109,19 @@ class CollabEngine:
         # Worker process tracking for resource-pressure killing
         self._worker_procs: dict[str, subprocess.Popen] = {}
         self._worker_procs_lock = threading.Lock()
+        self._recovery_attempts: dict[str, int] = {}
         self._resource_timeout_nodes: set[str] = set()
+        # Leader persistent session (proc/stdin/stdout) and worker message queues
+        self._leader_session: dict | None = None
+        self._session_queue: dict = {}
+        self._event_queue: queue.Queue = queue.Queue()
+        self._leader_replies: dict[tuple[str, str], str] = {}
+        self._running = False
+        # Leader watchdog / auto-restart
+        self._leader_available: bool = True
+        self._leader_max_restarts: int = 3
+        self._leader_restart_count: int = 0
+        self._leader_watchdog_stop: threading.Event = threading.Event()
         # Global worker semaphore: caps opencode worker processes across ALL runs
         self._global_max_concurrent = max(
             1, int(os.environ.get("HERMES_COLLAB_GLOBAL_MAX_CONCURRENT", str(global_max_concurrent)))
@@ -181,6 +216,125 @@ class CollabEngine:
             )
             return ""
 
+    def _render_package_plan(self, package_name: str, graph_def: dict) -> str:
+        """Render a detailed human-readable execution plan for a package.
+
+        Walks the topological steps of *graph_def*, describing each step's
+        type, associated skill, input mapping, condition branches, parallel
+        forks, etc.  The result is appended to ``plan.shared_brief`` so
+        downstream workers understand the intended execution flow.
+
+        Args:
+            package_name: Name of the scenario package.
+            graph_def: Dict representation of the SkillGraph (as stored in
+                       ``packages.sqlite3.packages.graph_definition``).
+
+        Returns:
+            Multi-line string describing the plan, or an empty string if
+            *graph_def* has no steps.
+        """
+        from backend.skill_graph import SkillGraph, SkillEdge
+
+        if not graph_def or not isinstance(graph_def, dict):
+            return ""
+        try:
+            graph = SkillGraph.from_dict(graph_def)
+        except (KeyError, ValueError, TypeError) as exc:
+            logging.getLogger(__name__).debug(
+                "_render_package_plan: from_dict failed for %s: %s",
+                package_name, exc,
+            )
+            return ""
+        if not graph.steps:
+            return ""
+
+        lines: list[str] = []
+        lines.append(f"## Package Plan: {graph.display_name} ({package_name})")
+        lines.append(f"Description: {graph.description}")
+        lines.append(f"Entry point: {graph.entry_point}")
+        lines.append(f"Exit points: {', '.join(graph.exit_points) if graph.exit_points else 'N/A'}")
+
+        # Topological order
+        try:
+            topo_order = graph.topological_sort()
+        except ValueError:
+            lines.append("⚠️  Graph contains cycles — cannot determine execution order.")
+            topo_order = list(graph.steps.keys())
+
+        lines.append(f"Steps ({len(topo_order)} total):")
+        for idx, step_id in enumerate(topo_order, 1):
+            step = graph.steps.get(step_id)
+            if step is None:
+                lines.append(f"  {idx}. **{step_id}** — (unknown)")
+                continue
+            deps = self._step_dependencies(step_id, graph)
+            dep_str = f" (depends on: {', '.join(deps)})" if deps else ""
+            lines.append(f"  {idx}. **{step.name}** [{step.step_type.value}]{dep_str}")
+            lines.append(f"     {self._describe_step(step)}")
+
+        lines.append("")
+        return "\n".join(lines)
+
+    def _describe_step(self, step: "Any") -> str:
+        """Return a human-readable one-line description of a skill step.
+
+        Args:
+            step: A ``SkillStep`` instance.
+
+        Returns:
+            Single-line description string.
+        """
+        from backend.skill_graph import StepType
+
+        st = step.step_type
+        if st == StepType.SKILL:
+            skill_name = step.skill_name or step.name
+            entry = self.skill_registry.get(skill_name)
+            desc = entry.description if entry else ""
+            im = step.input_mapping or {}
+            parts = [f"Skill: **{skill_name}**"]
+            if desc:
+                parts.append(f"({desc[:120]})")
+            if im:
+                mapping_str = ", ".join(f"{k} ← {v}" for k, v in im.items())
+                parts.append(f"inputs: [{mapping_str}]")
+            return " ".join(parts)
+        elif st == StepType.CONDITION:
+            parts = [f"Condition: `{step.condition or '(empty)'}`"]
+            if step.true_branch:
+                parts.append(f"→ true: **{step.true_branch}**")
+            if step.false_branch:
+                parts.append(f"→ false: **{step.false_branch}**")
+            return " | ".join(parts)
+        elif st == StepType.LOOP:
+            body = ", ".join(step.loop_body) if step.loop_body else "(empty)"
+            return (
+                f"Loop: max {step.max_iterations} iterations | "
+                f"body: [{body}] | "
+                f"condition: `{step.loop_condition or 'none'}`"
+            )
+        elif st == StepType.PARALLEL:
+            children = ", ".join(step.parallel_steps) if step.parallel_steps else "(empty)"
+            return f"Parallel: fork into [{children}]"
+        elif st == StepType.HUMAN:
+            return "Human-in-the-loop: awaiting manual input"
+        else:
+            return f"Step type: {st}"
+
+    def _step_dependencies(self, step_id: str, graph: "Any") -> list[str]:
+        """Return IDs of steps that *step_id* depends on (incoming edges).
+
+        Args:
+            step_id: The step to find dependencies for.
+            graph: A ``SkillGraph`` instance.
+
+        Returns:
+            Sorted list of dependency step IDs.
+        """
+        return sorted(
+            edge.from_step for edge in graph.edges if edge.to_step == step_id
+        )
+
     def _persist_run_state(self, run_id: str) -> None:
         self.store.save_run_state(run_id, run_id in self._paused_runs, self._checkpoint_paused_nodes)
 
@@ -194,6 +348,7 @@ class CollabEngine:
             for state in states
             for node_id in state["checkpoint_paused_nodes"]
         }
+        # 清理重启后残留的僵死 run 移至 server.py 启动时执行（引擎每请求创建一次，不能放这里）
 
     def _restore_run_state(self, run_id: str) -> None:
         state = self.store.load_run_state(run_id)
@@ -214,45 +369,274 @@ class CollabEngine:
             "checkpoint_paused_nodes": sorted(self._checkpoint_paused_nodes),
         }
 
-    def run(self, request: str, *, title: str | None = None, concurrency: int = 4, timeout: int = 86400, max_retries: int = 2, split_count: int = 4, aggregate: bool = True, package: str | None = None, package_skills: list[str] | None = None) -> dict:
-        run_id = "run_" + uuid.uuid4().hex[:12]
+    def _build_package_plan(self, graph, request: str, run_id: str, package_name: str, context_vars: dict) -> list:
+        """Convert SkillGraph steps into WBSNode list for the run() loop.
+
+        Each step in the graph becomes a WBS implementation node.
+        Dependencies (edges) are encoded as node.depends_on.
+        The Leader run loop in run() dispatches them in topological order.
+
+        When a step references a skill_name, loads the prompt_template
+        from the engine's SkillRegistry instead of using inline params.
+        """
+        from engine.models import WBSNode, Plan
+        import logging
+
+        topo_order = []
+        try:
+            topo_order = graph.topological_sort()
+        except Exception:
+            topo_order = list(graph.steps.keys())
+
+        nodes = []
+        prev_step_id = None
+        for step_id in topo_order:
+            step = graph.steps.get(step_id)
+            if not step:
+                continue
+
+            step_name = step.name or step_id
+            skill_name = getattr(step, 'skill_name', "")
+
+            # Load prompt from SkillRegistry if step references a registered skill
+            prompt_template = None
+            if skill_name:
+                skill_entry = self.skill_registry.get(skill_name)
+                if skill_entry and getattr(skill_entry, 'content', None):
+                    prompt_template = skill_entry.content
+                else:
+                    logging.getLogger(__name__).debug(
+                        "Skill %s not found in registry for step %s, fallback to inline",
+                        skill_name, step_id)
+
+            # Fallback to inline params
+            if not prompt_template:
+                skill_params = getattr(step, 'skill_params', {}) or getattr(step, 'params', {})
+                prompt_template = skill_params.get("prompt", skill_params.get("prompt_template",
+                    f"执行步骤: {step_name}"))
+
+            # Render template with context_vars
+            from string import Template
+            try:
+                filled_prompt = Template(prompt_template).safe_substitute(context_vars)
+            except Exception:
+                filled_prompt = prompt_template
+
+            # Create WBS node
+            from engine.models import WBSNode
+            node = WBSNode(
+                id=step_id,
+                title=step_name,
+                capability="implementation",
+                description=filled_prompt,
+                complexity=3,
+                dependencies=[],
+                parallelizable=False,
+                deliverable="",
+            )
+            # Set node-specific brief: only this step's task, not the full plan
+            node.brief = f"步骤: {step_name}" + (f"\n{step.description[:1000]}" if getattr(step, 'description', None) else "")
+            # Set dependency if not first step
+            if prev_step_id:
+                node.dependencies = [prev_step_id]
+            prev_step_id = step_id
+
+            nodes.append(node)
+
+        return nodes
+
+    def run(self, request: str, *, title: str | None = None, concurrency: int = 4, timeout: int = 86400, max_retries: int = 2, split_count: int = 4, aggregate: bool = True, package: str | None = None, package_skills: list[str] | None = None, session_id: str | None = None, prev_session_id: str | None = None, run_id: str | None = None) -> dict:
+        run_id = run_id or ("run_" + uuid.uuid4().hex[:12])
         score = self.planner.assess(request)
-        self.store.create_run(run_id, title or request[:80], request, score.to_dict(), agent=self.agent_backend.name)
+        self.store.create_run(run_id, title or request[:80], request, score.to_dict(), agent=self.agent_backend.name, session_id=session_id)
         self.store.log(run_id, "info", "complexity assessed", score.to_dict())
+        # Start leader persistent session (must succeed before any routing)
+        self._leader_restart_count = 0
+        self._leader_available = True
+        self._start_leader_session(run_id)
+        # Start event loop thread to process events -> leader routing
+        self._running = True
+        _evt_thread = threading.Thread(target=self._event_loop, daemon=True)
+        _evt_thread.start()
         # Persist package + the Skill collection it triggered so the dashboard
         # and downstream workers can see which scenario Leader picked.
         # If a package is set, also try to read its graph definition and
         # render a one-line plan summary via graph_interpreter.summarize_text
         # so the chat bubble can show "📋 Run 4 steps (3 skill, ...)".
         package_plan: str = ""
+        package_graph_def: dict | None = None
         if package:
             package_plan = self._summarize_package_plan(package)
+            # Read the full graph_def for detailed plan rendering
+            try:
+                from backend.scenario_packages import get_package
+                pkg = get_package(package, db_path=str(self.cwd / "data" / "packages.sqlite3"))
+                if pkg:
+                    package_graph_def = pkg.get("graph_definition")
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Failed to read graph_def for package %s: %s", package, exc,
+                )
         if package or package_skills:
+            # Build per-node skill mapping from graph definition steps
+            node_skill_map = {}
+            if package_graph_def and isinstance(package_graph_def, dict):
+                steps = package_graph_def.get("steps", {})
+                if isinstance(steps, dict):
+                    for sid, sdef in steps.items():
+                        if isinstance(sdef, dict):
+                            sk = sdef.get("skill_name", "")
+                            if sk:
+                                node_skill_map[sid] = sk
             self.store.set_run_meta(run_id, {
                 "package": package,
                 "package_skills": list(package_skills or []),
+                "node_skill_map": node_skill_map,
                 "package_plan": package_plan,
             })
 
-        if score.routing == "direct":
-            # Check if task is design/frontend related
-            _design_keywords = ["design", "ui", "ux", "interface", "layout", "frontend",
-                                "component", "tailwind", "daisyui", "button", "card", "modal",
-                                "navbar", "login", "form", "landing", "dashboard",
-                                "设计", "界面", "布局", "美观", "样式", "漂亮", "好看",
-                                "登录", "注册", "导航", "卡片", "弹窗", "页面"]
-            _cap = "design" if any(k in request.lower() for k in _design_keywords) else "general"
-            plan = Plan(nodes=[WBSNode("wbs-1", "Direct execution", request, _cap, score.overall, [], True, "Direct answer")])
+        # ── SkillGraph → WBS plan ──
+        # When a package has a SkillGraph, convert its steps into WBS nodes
+        plan_from_graph = None
+        self._graph_node_ids: set[str] | None = None
+        if package:
+            logging.getLogger(__name__).info(
+                "SkillGraph check: package=%s, graph_def_type=%s",
+                package, type(package_graph_def).__name__ if package_graph_def is not None else "None")
+            if package_graph_def and isinstance(package_graph_def, dict):
+                try:
+                    from backend.skill_graph import SkillGraph
+                    graph = SkillGraph.from_dict(package_graph_def)
+                    if graph and graph.steps:
+                        # Get context variables from site_map
+                        context_vars = {"target_url": "https://mail.qq.com",
+                                        "site_name": "", "user_request": request}
+                        try:
+                            from backend import site_map
+                            match_result = site_map.match(request)
+                            if match_result.get("target_url"):
+                                context_vars["target_url"] = match_result["target_url"]
+                            if match_result.get("site_name"):
+                                context_vars["site_name"] = match_result["site_name"]
+                        except Exception:
+                            pass
+                        # Build nodes from graph
+                        graph_nodes = self._build_package_plan(
+                            graph, request, run_id, package, context_vars)
+                        if graph_nodes:
+                            from engine.models import Plan
+                            plan_from_graph = Plan(nodes=graph_nodes, shared_brief=(
+                                f"SkillGraph plan: {len(graph_nodes)} steps"
+                            ))
+                            self._graph_node_ids = {n.id for n in graph_nodes}
+                            self.store.log(run_id, "info",
+                                           f"skillgraph plan: {len(graph_nodes)} nodes from {package}")
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "SkillGraph plan failed, falling back to WBS: %s", exc)
+            else:
+                logging.getLogger(__name__).info(
+                    "SkillGraph check: graph_def not a dict, type=%s",
+                    type(package_graph_def).__name__)
+
+        if plan_from_graph:
+            plan = plan_from_graph
+        elif score.routing == "direct":
+            self._direct_mode = True
+            return self._run_direct(run_id, request, score, package, session_id, timeout)
+        elif score.routing == "single":
+            plan = self.planner.fallback_wbs(request, score=score)
         else:
-            plan = self.planner.decompose(request, capabilities=self.agent_backend.capabilities, agent_backend=self.agent_backend)
+            plan = self.planner.decompose(
+                request,
+                capabilities=self.agent_backend.capabilities,
+                agent_backend=self.agent_backend,
+                package=package,
+                package_graph_def=package_plan or None,
+                score=score,
+            )
         if isinstance(plan, list):
             plan = Plan(nodes=plan)
+        # Append detailed package plan to shared_brief so downstream
+        # workers understand the intended execution flow.
+        if package_graph_def:
+            rendered = self._render_package_plan(package or "", package_graph_def)
+            if rendered:
+                if plan.shared_brief:
+                    plan.shared_brief += "\n" + rendered
+                else:
+                    plan.shared_brief = rendered
         nodes = plan.nodes
         if plan.shared_brief:
             self.store.log(run_id, "info", "shared plan brief created", {"shared_brief": plan.shared_brief})
             for node in nodes:
                 if node.capability == "implementation":
                     node.brief = f"Shared brief:\n{plan.shared_brief}\n\nNode brief:\n{node.brief}" if node.brief else plan.shared_brief
+        # Inject past session turns as context for continuous conversation
+        if session_id:
+            past_turns = self.store.get_session_turns(session_id, limit=5)
+            if past_turns:
+                turn_lines = []
+                for t in past_turns:
+                    req_preview = t["user_request"][:200]
+                    agg_preview = (t["aggregate"] or "")[:200]
+                    turn_lines.append(f"  [{t['turn_index']}] User: {req_preview}")
+                    if agg_preview:
+                        turn_lines.append(f"       Result: {agg_preview}")
+                session_ctx = (
+                    f"Session context — previous turns in session {session_id[:12]}...:\n"
+                    + "\n".join(turn_lines)
+                    + "\n\n"
+                )
+                plan.shared_brief = (plan.shared_brief or "") + session_ctx
+        # Inject previous-session context for conversation continuation (会话链)
+        if prev_session_id:
+            from .store import get_model_context_limit
+            # Get current model context limit
+            model_name = self.leader_model or ""
+            ctx_limit = get_model_context_limit(model_name)
+            # 80% threshold for safe injection
+            max_inject_tokens = int(ctx_limit * 0.8)
+            prev_turns = self.store.get_session_turns(prev_session_id, limit=999)
+            if prev_turns:
+                turn_lines = []
+                total_est_tokens = 0
+                # Estimate existing tokens from shared_brief + request
+                existing_est = len(plan.shared_brief or "") * 0.25 + len(request) * 0.25
+                budget = max_inject_tokens - existing_est
+                # Build context lines from the last turns, stopping if budget exceeded
+                for t in reversed(prev_turns):
+                    req_preview = t["user_request"][:300]
+                    agg_preview = (t["aggregate"] or "")[:300]
+                    line = f"  [{t['turn_index']}] User: {req_preview}"
+                    if agg_preview:
+                        line += f"\n       Result: {agg_preview}"
+                    est_tokens = len(line) * 0.25
+                    if total_est_tokens + est_tokens > budget and len(turn_lines) >= 3:
+                        # Truncate: keep only what fits within budget; keep minimum 3 turns
+                        break
+                    turn_lines.append(line)
+                    total_est_tokens += est_tokens
+                # Ensure at least last 3 turns if available
+                min_turns = min(3, len(prev_turns))
+                if len(turn_lines) < min_turns:
+                    turn_lines = [f"  [{t['turn_index']}] User: {t['user_request'][:300]}" + (f"\n       Result: {(t['aggregate'] or '')[:300]}" if t.get('aggregate') else "") for t in prev_turns[-min_turns:]]
+                # Sort turns chronologically for context coherence
+                turn_lines.sort(key=lambda x: int(x.split("[")[1].split("]")[0]) if "[" in x else 0)
+                prev_ctx = (
+                    f"Previous session context — conversation history from {prev_session_id[:12]}...:\n"
+                    + "\n".join(turn_lines)
+                    + "\n\n"
+                )
+                plan.shared_brief = (plan.shared_brief or "") + prev_ctx
+                self.store.log(run_id, "info", "prev_session context injected", {
+                    "prev_session_id": prev_session_id,
+                    "turns_used": len(turn_lines),
+                    "total_prev_turns": len(prev_turns),
+                    "estimated_tokens": int(total_est_tokens),
+                    "model": model_name,
+                    "model_ctx_limit": ctx_limit,
+                })
         with self._node_results_lock:
             self._current_plan = plan
             self._node_results = {}
@@ -296,7 +680,7 @@ class CollabEngine:
                 "lessons_learned": [],
                 "abort_reason": f"wbs_persistence_incomplete: missing {missing}",
             }
-        self._preallocate_skills_tools(run_id, nodes)
+        self._preallocate_skills_tools(run_id, nodes, task_type=plan.task_type)
         self._restore_run_state(run_id)
         # Override with this run's own checkpoint_paused state
         run_state = self.store.load_run_state(run_id)
@@ -408,7 +792,7 @@ class CollabEngine:
 
                         # ── Total run budget check ──────────────────────────
                         remaining_budget = max(0, timeout - (time.time() - started_at))
-                        if remaining_budget < 30 and completed:
+                        if remaining_budget < 30:
                             self.store.log(
                                 run_id, "warning",
                                 "run budget running low",
@@ -477,6 +861,10 @@ class CollabEngine:
                     if not running:
                         if self._checkpoint_paused_nodes:
                             break
+                        # Tight-spin guard: if pending nodes exist but nothing can
+                        # dispatch, back off to prevent 100% CPU ghost loop.
+                        if pending:
+                            time.sleep(5)
                         # Deferred recovery: if resources available, re-dispatch killed nodes
                         if deferred_queue:
                             cpu_now = self._get_cpu_percent() or 0
@@ -596,51 +984,133 @@ class CollabEngine:
                         else:
                             failed_final.extend(node_results)
 
-                    # Tier 3: Leader run assessment — if a checkpoint node failed and
-                    # there are still pending nodes, ask the leader whether to continue.
+                    # If a checkpoint node failed and recovery exhausted, abort the run
                     if failed_final and pending:
                         checkpoint_failed = any(
                             hasattr(n, 'checkpoint') and n.checkpoint
                             for n in failed_final
                         )
                         if checkpoint_failed:
-                            remaining_ids = list(pending.keys())
-                            failed_ids = [r.node_id for r in failed_final[-5:]]
-                            elapsed = time.time() - started_at
-                            action = self._leader_guard_run(
-                                run_id, request, failed_ids, remaining_ids,
-                                elapsed, timeout,
-                            )
-                            if action == "abort":
-                                self.store.log(run_id, "warning",
-                                    "run aborted by leader guard",
-                                    {"failed_nodes": failed_ids})
-                                for nid in list(pending.keys()):
-                                    self.store.update_node(nid, "failed",
-                                        error="run aborted by leader guard",
-                                        run_id=run_id)
-                                pending.clear()
-                                break
+                            self.store.log(run_id, "warning",
+                                "run aborted — checkpoint node failed after recovery",
+                                {"failed_nodes": [r.node_id for r in failed_final]})
+                            for nid in list(pending.keys()):
+                                self.store.update_node(nid, "failed",
+                                    error="checkpoint node failed after recovery",
+                                    run_id=run_id)
+                            pending.clear()
+                            break
+
+            # Post-execution file conflict detection
+            conflicts = self._detect_file_conflicts(run_id, results)
+            if conflicts:
+                self.store.log(run_id, "warn",
+                    f"File conflicts found: {len(conflicts)} file(s) written by multiple workers. "
+                    "The last worker's changes may overwrite earlier work.",
+                    {"conflicts": conflicts})
 
             final = None
             if aggregate:
-                final = self._aggregate(run_id, request, results, timeout)
-                self.store.update_node(
-                    final.node_id,
-                    "completed" if final.ok else "failed",
-                    final.result,
-                    final.session_id,
-                    final.duration_seconds,
-                    None if final.ok else final.result,
-                    run_id=run_id,
-                )
-                if final.ok:
-                    self._record_node_result(run_id, final)
+                if score.routing == "direct" and results:
+                    # direct 路由：worker 结果就是最终答案，跳过 aggregate 节点。
+                    final = results[0]
+                    if final and final.node_id:
+                        self.store.update_node(
+                            final.node_id,
+                            "completed" if final.ok else "failed",
+                            final.result,
+                            final.session_id,
+                            final.duration_seconds,
+                            None if final.ok else final.result,
+                            run_id=run_id,
+                        )
+                else:
+                    final = self._aggregate(run_id, request, results, timeout)
+                    self.store.update_node(
+                        final.node_id,
+                        "completed" if final.ok else "failed",
+                        final.result,
+                        final.session_id,
+                        final.duration_seconds,
+                        None if final.ok else final.result,
+                        run_id=run_id,
+                    )
+                    if final.ok:
+                        self._record_node_result(run_id, final)
+                    # Merge all worker files_modified into aggregate result_struct
+                    merged_files = set()
+                    for r in results:
+                        if r.result_struct:
+                            files = r.result_struct.get("files_modified", []) or []
+                            if isinstance(files, list):
+                                for f in files:
+                                    if isinstance(f, str) and f.strip():
+                                        merged_files.add(f.strip())
+                    if merged_files and final.result_struct:
+                        final.result_struct["files_modified"] = sorted(merged_files)
+                        self.store.save_node_result(run_id, final.node_id,
+                            final.result or "", final.result_struct)
             self._learn(run_id, results)
+
+            if session_id:
+                aggregate_text = final.result if final else ""
+                self.store.add_session_turn(session_id, run_id, request, aggregate_text)
 
             ok = not failed_final and (final.ok if final else True)
             self.store.update_run(run_id, "completed" if ok else "failed")
+
+            # ── Suggested skills from WBS-generated nodes ──
+            suggested = []
+            if ok and self._graph_node_ids:
+                for r in results:
+                    node_id = getattr(r, 'node_id', '')
+                    if node_id and node_id not in self._graph_node_ids:
+                        if hasattr(r, 'title') and r.title:
+                            title = r.title or node_id
+                            desc = (r.result or "")[:200]
+                            suggested.append({
+                                "name": node_id.replace("-", "_"),
+                                "display_name": title,
+                                "description": desc[:100],
+                                "prompt_template": f"执行以下任务：{title}\n\n详细说明：{desc}",
+                                "category": "generated",
+                            })
+                if suggested:
+                    self.store.set_run_meta(run_id, {
+                        "suggested_skills": suggested,
+                    })
+                    self.store.log(run_id, "info",
+                                   f"suggested {len(suggested)} skill(s) from WBS overflow",
+                                   {"suggested": suggested})
+
             self.store.log(run_id, "info" if ok else "error", "run finished", {"ok": ok})
+            # Scan output/ for files generated during this run
+            if ok:
+                try:
+                    output_dir = self.cwd / "output"
+                    if output_dir and output_dir.exists():
+                        import time as _time
+                        started_row = self.store._one(
+                            "SELECT created_at FROM runs WHERE id=?", (run_id,)
+                        )
+                        if started_row:
+                            from datetime import datetime as _dt
+                            start_ts = _dt.strptime(started_row[0], "%Y-%m-%d %H:%M:%S").timestamp()
+                            new_files = []
+                            for fpath in sorted(output_dir.iterdir()):
+                                if fpath.is_file() and fpath.name != '.gitkeep':
+                                    mtime = fpath.stat().st_mtime
+                                    if mtime >= start_ts - 120:
+                                        new_files.append({
+                                            "path": f"output/{fpath.name}",
+                                            "size": fpath.stat().st_size,
+                                            "mtime": _time.strftime(
+                                                "%Y-%m-%d %H:%M:%S", _time.localtime(mtime)),
+                                        })
+                            if new_files:
+                                self.store.save_run_files(run_id, new_files)
+                except Exception:
+                    pass  # file scan non-blocking
 
             # Collect high-value lessons for parent (Hermes) memory mapping
             _EXCLUDED_CATEGORIES = {"planning", "worker-contract"}
@@ -1026,6 +1496,8 @@ class CollabEngine:
                         "description": new_desc[:200]}, node.id)
         return new_node
 
+    MAX_RECOVERIES = 3
+
     def _leader_guard_run(self, run_id: str, request: str,
                           failed_node_ids: list[str], remaining_node_ids: list[str],
                           elapsed: float, timeout: int) -> str:
@@ -1163,11 +1635,47 @@ class CollabEngine:
     def _split_node(self, node: WBSNode, split_count: int) -> list[WBSNode]:
         """Split an over-budget node into shards.
 
-        Phase 1 (parallel, read-only): scope + evidence — collect context.
-        Phase 2 (depends on phase 1): implementation — actually write files.
+        For development tasks: Phase 1 (parallel, read-only) scope + evidence,
+        Phase 2 (depends on phase 1) implementation.
+        For operation/execution tasks: skip research phase, go straight to execution.
         """
         parent_fingerprint = self._node_fingerprint(node)
-        # Phase 1: read-only context shards
+        # Detect operation tasks — skip research phases
+        _is_operation = False
+        try:
+            tt = self._current_plan.task_type if self._current_plan else "development"
+            _is_operation = tt == "operation"
+        except Exception:
+            pass
+        if _is_operation:
+            # Operation tasks: skip scope/evidence, only create execution shards
+            impl_shards = []
+            for i in range(max(1, split_count)):
+                impl_shard = WBSNode(
+                    id=f"{node.id}-impl-{i+1}",
+                    title=f"{node.title} / execution-{i+1}",
+                    description=(
+                        f"Shard from over-budget operation parent — EXECUTION phase.\n"
+                        f"You MUST execute the task using available tools "
+                        f"(browser, search, commands). Do NOT analyze or research.\n"
+                        f"Execute directly.\n\n"
+                        f"Original task:\n{node.description}"
+                    ),
+                    capability="implementation",
+                    complexity=max(1, node.complexity - 2),
+                    dependencies=[],
+                    parallelizable=True,
+                    deliverable=f"Operation executed successfully",
+                    parent_id=node.id,
+                    attempt=node.attempt + 1,
+                    brief=node.brief,
+                    write_targets=list(node.write_targets),
+                    fingerprint=f"{parent_fingerprint}:impl:{i}",
+                )
+                impl_shards.append(impl_shard)
+            return impl_shards
+
+        # Phase 1: read-only context shards (development tasks only)
         scope_shard = WBSNode(
             id=f"{node.id}-scope-1",
             title=f"{node.title} / scope",
@@ -1215,9 +1723,12 @@ class CollabEngine:
                 id=f"{node.id}-impl-{i+3}",
                 title=f"{node.title} / implementation-{i+1}",
                 description=(
-                    f"Shard from over-budget parent — IMPLEMENTATION phase.\n"
-                    f"You MUST write actual code changes to files. Do NOT just produce a plan.\n"
-                    f"Use the upstream context from scope and evidence shards to guide your changes.\n"
+                    f"Shard from over-budget parent — "
+                    f"{'EXECUTION' if 'implement' not in (node.capability or '').lower() else 'IMPLEMENTATION'} phase.\n"
+                    f"You MUST "
+                    f"{'execute the task using available tools (browser, search, commands)' if 'implement' not in (node.capability or '').lower() else 'write actual code changes to files'}"
+                    f". Do NOT just produce a plan.\n"
+                    f"Use the upstream context from scope and evidence shards to guide your actions.\n"
                     f"Focus on a distinct subset of the original task.\n\n"
                     f"Original task:\n{node.description}"
                 ),
@@ -1379,7 +1890,7 @@ class CollabEngine:
     def _task_text_for_worker(self, node: WBSNode) -> str:
         return "\n".join(part for part in (node.title, node.deliverable, node.brief, node.description) if part)
 
-    def _preallocate_skills_tools(self, run_id: str, nodes: list[WBSNode]) -> None:
+    def _preallocate_skills_tools(self, run_id: str, nodes: list[WBSNode], task_type: str = "development") -> None:
         """Pre-compute skills/tools for all nodes before workers start.
 
         Called once after WBS decomposition, before worker dispatch.
@@ -1394,19 +1905,24 @@ class CollabEngine:
         bundle), the package's Skill collection is treated as the canonical
         skill set for *every* node unless a node already has skills_json.
         """
+        self.skill_registry.refresh()
         native_caps = set(self.agent_backend.capabilities)
         package_meta = self.store.get_run_meta(run_id) or {}
         package_skills: list[str] = list(package_meta.get("package_skills") or [])
+        node_skill_map: dict = package_meta.get("node_skill_map") or {}
         for node in nodes:
             try:
                 # Respect leader-assigned values; only fill gaps via distributor
                 if not node.skills_json or not node.tools_json:
                     # Determine leader_skills for the distributor:
                     #   1. Leader-assigned skills_json on the node
-                    #   2. Package-level skills (scenario override)
-                    #   3. None → fall back to capability default
+                    #   2. Package node_skill_map → only this node's skill
+                    #   3. Package-level skills (scenario override, fallback)
+                    #   4. None → fall back to capability default
                     if node.skills_json:
                         leader_skills = json.loads(node.skills_json)
+                    elif node.id in node_skill_map:
+                        leader_skills = [node_skill_map[node.id]]
                     elif package_skills:
                         leader_skills = list(package_skills)
                     else:
@@ -1416,6 +1932,8 @@ class CollabEngine:
                         node_capability=node.capability,
                         leader_skills=leader_skills,
                         agent_backend=self.agent_backend,
+                        task_type=task_type,
+                        task_description=node.description,
                     )
                     if not node.skills_json:
                         node.skills_json = json.dumps(skill_names)
@@ -1557,6 +2075,11 @@ class CollabEngine:
             if value:
                 env[target] = value
         self._configure_git_credentials(env)
+        # Safety net: ensure PATH is never empty when spawning subprocesses.
+        # systemd's default PATH is minimal; this prevents cryptic ENOENT errors
+        # for tools like `hermes` (leader aggregator) installed in standard dirs.
+        if not env.get("PATH", "").strip():
+            env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
         return env
 
     def _append_git_config(self, env: dict[str, str], key: str, value: str) -> None:
@@ -1583,14 +2106,14 @@ class CollabEngine:
             env,
             "credential.helper",
             "!f() { "
-            "test \"$1\" = get || exit 0; "
+            'test "$1" = get || exit 0; '
             "protocol=; host=; "
-            "while IFS= read -r line; do "
-            "case \"$line\" in protocol=*) protocol=${line#protocol=};; host=*) host=${line#host=};; esac; "
+            'while IFS= read -r line; do '
+            'case "$line" in protocol=*) protocol=${line#protocol=};; host=*) host=${line#host=};; esac; '
             "done; "
-            "test \"$protocol\" = https || exit 0; "
-            "case \",${HERMES_COLLAB_GIT_ALLOWED_HOSTS},\" in *,\"$host\",*) ;; *) exit 0;; esac; "
-            "test -n \"$HERMES_COLLAB_GIT_TOKEN\" || exit 0; "
+            'test "$protocol" = https || exit 0; '
+            'case ",${HERMES_COLLAB_GIT_ALLOWED_HOSTS}," in *,"$host",*) ;; *) exit 0;; esac; '
+            'test -n "$HERMES_COLLAB_GIT_TOKEN" || exit 0; '
             "printf 'username=%s\\npassword=%s\\n' \"$HERMES_COLLAB_GIT_USERNAME\" \"$HERMES_COLLAB_GIT_TOKEN\"; "
             "}; f",
         )
@@ -1826,9 +2349,7 @@ Output contract:
             self.store.log(run_id, "warning", "prompt truncated for ARG_MAX",
                 {"node": node.id, "original_bytes": _pb_len,
                  "truncated_to": _PROMPT_SAFE_MAX_BYTES}, node.id)
-        # 2026-06-21: second pass — hard cap the EXEC'd arg (prompt) at 900KB
-        # to stay well under 2 MB ARG_MAX even after env expansion.
-        # Use the same byte-aware truncation as above.
+        # 2026-06-21: second pass — hard cap at 900KB for safety
         _pb2 = prompt.encode("utf-8", errors="replace")
         if len(_pb2) > 900_000:
             _half2 = 450_000
@@ -1836,6 +2357,7 @@ Output contract:
                    + "\n...[FINAL ARG_MAX SAFETY TRUNCATION: " + str(len(_pb2)) + " bytes > 900KB limit]...\n" \
                    + _pb2[-_half2:].decode("utf-8", errors="ignore")
         selected_model = model_override or self.worker_model
+
         # If prompt is too long for command-line args, use stdin via temp file.
         # Only applies to backends with a prompt_flag (e.g. claude -p "...");
         # positional-arg backends (opencode run "...") take prompt directly
@@ -2037,10 +2559,20 @@ Output contract:
         return combined_text, combined_struct
 
     def _aggregate(self, run_id: str, request: str, results: list[WorkerResult], timeout: int) -> WorkerResult:
-
         node = WBSNode(f"{run_id}-aggregate", "Aggregate results", "Aggregate worker outputs into final answer", "aggregation", 5, [], False, "Final answer")
         self.store.insert_wbs_node(run_id, node.to_dict())
         self.store.update_node(node.id, "running", run_id=run_id)
+
+        # ★ Short-circuit: single successful result → pass through, no LLM call
+        if len(results) == 1 and results[0].ok:
+            w = results[0]
+            result_text = re.sub(r'HERMES-COLLAB-RESULT[\s\S]*', '', w.result).strip() or w.result
+            return WorkerResult(
+                node.id, node.title, True, result_text,
+                w.session_id, w.duration_seconds, 0, "", 1,
+                result_struct=w.result_struct,
+            )
+
         # 2026-06-21: Use result_struct.summary instead of full result text
         # to prevent ARG_MAX overflow. Each worker's summary is short (~100 chars).
         summaries = []
@@ -2074,16 +2606,544 @@ Output contract:
             f"Original request:\n{request}\n\nWorker results:\n{report}\n\n"
             f"Produce final concise report. Mention timeouts and shard coverage honestly."
             f"{package_block}"
+            f"\n\nWhen generating your HERMES-COLLAB-RESULT JSON, include ALL files_modified from the upstream workers listed above."
+            f" Use paths relative to the project root."
         )
         return self._run_worker(run_id, node, timeout, model_override=self.leader_model, role="leader")
 
     def _learn(self, run_id: str, results: list[WorkerResult]) -> None:
         timeouts = [r for r in results if r.returncode == 124]
         if timeouts:
-            self.store.add_lesson("watchdog", f"Run {run_id}: {len(timeouts)} worker(s) timed out; split large WBS nodes earlier or reduce scope.", {"run_id": run_id})
+            self.store.add_lesson(
+                "watchdog",
+                f"Run {run_id}: {len(timeouts)} worker(s) timed out; split large WBS nodes earlier or reduce scope.",
+                {"run_id": run_id, "nodes": [r.node_id for r in timeouts]},
+                scope="L1",
+                tags=["timeout", "wbs-scope"],
+            )
         slow = [r for r in results if r.duration_seconds > 120 and r.ok]
         if slow:
-            self.store.add_lesson("planning", f"Run {run_id}: {len(slow)} slow successful worker(s); consider smaller WBS nodes for similar tasks.", {"run_id": run_id})
+            self.store.add_lesson(
+                "planning",
+                f"Run {run_id}: {len(slow)} slow successful worker(s); consider smaller WBS nodes for similar tasks.",
+                {"run_id": run_id, "nodes": [r.node_id for r in slow]},
+                scope="L1",
+                tags=["slow-worker", "wbs-granularity"],
+            )
+        argmax = [
+            r for r in results
+            if r.returncode == 7 or (r.stderr and "Argument list too long" in r.stderr)
+        ]
+        if argmax:
+            self.store.add_lesson(
+                "watchdog",
+                f"Run {run_id}: {len(argmax)} worker(s) hit ARG_MAX limit; reduce WBS scope or split node input into smaller chunks.",
+                {"run_id": run_id, "nodes": [r.node_id for r in argmax]},
+                scope="L1",
+                tags=["argmax", "wbs-scope"],
+            )
+
+    # ── Post-execution file conflict detection ──────────────────────
+    def _detect_file_conflicts(self, run_id: str, results: list[WorkerResult]) -> list[dict]:
+        file_to_nodes: dict[str, list[str]] = {}
+        for r in results:
+            if not r.ok or not r.result:
+                continue
+            try:
+                contract, _ = self._parse_result_contract(r.result)
+                if contract and isinstance(contract.get("files_modified"), list):
+                    for f in contract["files_modified"]:
+                        if isinstance(f, str) and f.strip():
+                            file_to_nodes.setdefault(f.strip(), []).append(r.node_id)
+            except Exception:
+                pass
+        conflicts = []
+        for file_path, node_ids in file_to_nodes.items():
+            if len(node_ids) > 1:
+                conflicts.append({"file": file_path, "nodes": node_ids})
+                self.store.log(run_id, "warn",
+                    f"FILE CONFLICT: '{file_path}' modified by {len(node_ids)} workers: {', '.join(node_ids)}",
+                    {"file": file_path, "nodes": node_ids})
+        return conflicts
+
+    # ------------------------------------------------------------------
+    # v3: Leader persistent session, direct mode, event loop
+    # ------------------------------------------------------------------
+
+    def _event_loop(self):
+        """Background thread: process events from _event_queue and handle leader health checks."""
+        _log = logging.getLogger(__name__)
+        while self._running:
+            try:
+                event = self._event_queue.get(timeout=1)
+                self._route_event(event)
+            except queue.Empty:
+                pass
+            except Exception as exc:
+                _log.warning("[EventLoop] Error processing event: %s", exc)
+
+            # ── Leader health check (every cycle) ──
+            try:
+                session = self._leader_session
+                if session:
+                    proc = session.get("proc")
+                    if proc is not None and proc.poll() is not None:
+                        _log.warning(
+                            "[EventLoop] leader session died (pid=%d, rc=%s), triggering restart",
+                            proc.pid,
+                            proc.returncode,
+                        )
+                        run_id = session.get("run_id", "unknown")
+                        self.store.log(
+                            run_id, "warning",
+                            "leader session died, restarting",
+                            {
+                                "pid": proc.pid,
+                                "returncode": proc.returncode,
+                                "restart_count": self._leader_restart_count,
+                                "max_restarts": self._leader_max_restarts,
+                            },
+                        )
+                        self._start_leader_session(run_id)
+            except Exception as exc:
+                _log.warning("[EventLoop] Leader health check error: %s", exc)
+
+    def _route_event(self, event: dict):
+        """Route an event from the event queue to the appropriate handler."""
+        from logging import getLogger as _log
+        _log = _log(__name__)
+        event_type = event.get("type", "")
+        detail = event.get("detail", "")
+        node_id = event.get("node_id", "")
+        run_id = event.get("run_id", "")
+
+        if event_type == "leader_replied":
+            # Leader has replied — write reply to workspace files for worker to read
+            _reply_text = self._leader_replies.pop((run_id, node_id), detail)
+            _log.info("[EventLoop] Leader replied for node %s: %s", node_id, _reply_text[:80])
+
+            # ── Write leader_reply.txt ──
+            _workspace_dir = self.cwd / ".workspace" / run_id[:8]
+            _reply_path = _workspace_dir / "leader_reply.txt"
+            try:
+                _workspace_dir.mkdir(parents=True, exist_ok=True)
+                _reply_path.write_text(_reply_text, encoding="utf-8")
+            except Exception as exc:
+                _log.warning("[EventLoop] Failed to write leader reply to %s: %s", _reply_path, exc)
+
+            # ── Write node-level leader_reply.txt ──
+            if node_id:
+                _node_dir = _workspace_dir / node_id[:10]
+                _node_reply_path = _node_dir / "leader_reply.txt"
+                try:
+                    _node_dir.mkdir(parents=True, exist_ok=True)
+                    _node_reply_path.write_text(_reply_text, encoding="utf-8")
+                except Exception as exc:
+                    _log.warning("[EventLoop] Failed to write node leader reply to %s: %s", _node_reply_path, exc)
+
+            # Log the write operation
+            try:
+                self.store.log(run_id, "info", "leader reply written", {"reply": _reply_text[:200]})
+            except Exception as exc:
+                _log.warning("[EventLoop] Failed to log leader reply write: %s", exc)
+
+            # Update node status to running
+            try:
+                self.store.update_node(node_id, "running", run_id=run_id)
+                _log.info("[EventLoop] Node %s → running (leader replied)", node_id)
+            except Exception as exc:
+                _log.warning("[EventLoop] Failed to update node %s on leader_replied: %s", node_id, exc)
+
+        else:
+            _log.debug("[EventLoop] Unhandled event type: %s", event_type)
+
+    def _wait_leader_reply(self, node_id: str, run_id: str) -> None:
+        """Background thread: read leader stdout after a need_input was forwarded.
+
+        Waits up to 120 seconds for the leader to produce output on its stdout.
+        After 3 seconds of silence the reply is considered complete, and a
+        ``leader_replied`` event is pushed onto the event queue.
+
+        If the leader process dies during the wait, falls back immediately.
+        """
+        import logging as _logging
+        import select as _sel
+
+        _log = _logging.getLogger(__name__)
+        _leader = self._leader_session
+        if not _leader or not _leader.get("stdout"):
+            _log.warning("[LeaderReply] No leader stdout for node %s, falling back to running", node_id)
+            self.store.update_node(node_id, "running", run_id=run_id)
+            return
+
+        _sfd = _leader["stdout"]
+        _proc = _leader.get("proc")
+        try:
+            _fd = _sfd.fileno()
+        except Exception:
+            _log.warning("[LeaderReply] Leader stdout fd unavailable for node %s, falling back", node_id)
+            self.store.update_node(node_id, "running", run_id=run_id)
+            return
+
+        _lines = []
+        _deadline = time.time() + 120  # max wait for leader reply
+        _idle_limit = 3.0  # seconds of silence = reply complete
+
+        while time.time() < _deadline:
+            # ── Check leader health ──
+            if _proc is not None and _proc.poll() is not None:
+                _log.warning(
+                    "[LeaderReply] leader died while waiting for reply on node %s (rc=%s), falling back",
+                    node_id,
+                    _proc.returncode,
+                )
+                self.store.update_node(node_id, "running", run_id=run_id)
+                return
+
+            try:
+                _r, _, _ = _sel.select([_fd], [], [], _idle_limit)
+                if _r:
+                    _line = _sfd.readline()
+                    if not _line:
+                        break
+                    # Skip prompt lines that hermes may echo
+                    stripped = _line.strip()
+                    if stripped in ("> ", ">", "") or stripped.startswith("> "):
+                        continue
+                    _lines.append(_line)
+                else:
+                    # Idle timeout — response is complete
+                    break
+            except Exception:
+                break
+
+        if _lines:
+            _reply = "".join(_lines).strip()
+            _log.info("[LeaderReply] Leader replied for node %s (%d chars)", node_id, len(_reply))
+            self._leader_replies[(run_id, node_id)] = _reply
+            self._event_queue.put({
+                "type": "leader_replied",
+                "node_id": node_id,
+                "run_id": run_id,
+                "detail": _reply[:200],
+                "timestamp": time.time(),
+            })
+        else:
+            _log.warning("[LeaderReply] No leader reply for node %s within deadline, falling back", node_id)
+            self.store.update_node(node_id, "running", run_id=run_id)
+
+    def _start_leader_session(self, run_id: str) -> bool:
+        """Start a persistent leader session via ``hermes chat -z --resume dt-leader-{run_id}``.
+
+        The leader session is a long-running subprocess that the engine
+        can use to communicate with the leader LLM throughout the run's
+        lifecycle.  The proc handle is stored in ``self._leader_session``.
+        This method also tracks restart count and starts a watchdog
+        daemon thread that auto-restarts the leader if it dies.
+
+        If the leader has already been restarted ``_leader_max_restarts``
+        times, it sets ``_leader_available = False`` and does not retry.
+
+        Returns:
+            True if the session was started successfully, False otherwise.
+        """
+        # ── Check restart budget ──
+        if self._leader_restart_count >= self._leader_max_restarts:
+            self._leader_available = False
+            _log = logging.getLogger(__name__)
+            _log.warning(
+                "[LeaderWatchdog] leader restart limit (%d) reached, marking unavailable",
+                self._leader_max_restarts,
+            )
+            self.store.log(
+                run_id, "warning",
+                "leader restart limit reached, leader unavailable",
+                {"restart_count": self._leader_restart_count, "max": self._leader_max_restarts},
+            )
+            return False
+
+        # ── Kill any existing leader proc ──
+        old = self._leader_session
+        if old and old.get("proc"):
+            old_proc = old["proc"]
+            _log = logging.getLogger(__name__)
+            if old_proc.poll() is None:
+                _log.info(
+                    "[LeaderWatchdog] killing old leader proc pid=%d",
+                    old_proc.pid,
+                )
+                try:
+                    old_proc.terminate()
+                    old_proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        old_proc.kill()
+                        old_proc.wait(timeout=3)
+                    except Exception:
+                        pass
+            # Close old pipes
+            for pipe_name in ("stdin", "stdout", "stderr"):
+                pipe = old.get(pipe_name)
+                if pipe and not pipe.closed:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
+
+        session_name = f"dt-leader-{run_id}"
+        cmd = ["hermes", "chat", "-q", "", "--resume", session_name, "--quiet"]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            self._leader_session = {
+                "proc": proc,
+                "stdin": proc.stdin,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "session_name": session_name,
+                "run_id": run_id,
+                "event_queue": self._event_queue,
+            }
+            self._leader_available = True
+            self._leader_restart_count += 1
+            self.store.log(
+                run_id, "info",
+                "leader persistent session started",
+                {
+                    "session_name": session_name,
+                    "pid": proc.pid,
+                    "restart_count": self._leader_restart_count,
+                },
+            )
+            # ── Start a watchdog daemon for this leader ──
+            self._leader_watchdog_stop.clear()
+            _wt = threading.Thread(
+                target=self._leader_watchdog,
+                args=(run_id,),
+                daemon=True,
+            )
+            _wt.start()
+            return True
+        except (FileNotFoundError, OSError) as exc:
+            _log = logging.getLogger(__name__)
+            _log.warning(
+                "[LeaderSession] failed to start leader session: %s", exc,
+            )
+            self.store.log(
+                run_id, "warning",
+                f"failed to start leader session: {exc}",
+                {"session_name": session_name},
+            )
+            self._leader_session = None
+            return False
+
+    def _leader_watchdog(self, run_id: str) -> None:
+        """Daemon thread: monitor leader process and auto-restart if it dies.
+
+        Checks every 5 seconds.  If the leader proc has exited, logs the
+        event and calls ``_start_leader_session`` to restart it.  Stops
+        checking when ``_leader_watchdog_stop`` is set (engine shutdown)
+        or when ``_leader_available`` is False (restart budget exhausted).
+        """
+        _log = logging.getLogger(__name__)
+        while self._running and not self._leader_watchdog_stop.is_set():
+            time.sleep(5)
+
+            if self._leader_watchdog_stop.is_set() or not self._running:
+                break
+
+            if not self._leader_available:
+                # Restart budget exhausted — stop watchdog
+                _log.warning(
+                    "[LeaderWatchdog] leader unavailable, watchdog stopping",
+                )
+                break
+
+            session = self._leader_session
+            if session is None:
+                continue
+
+            proc = session.get("proc")
+            if proc is None:
+                continue
+
+            # Check if leader proc has exited
+            if proc.poll() is not None:
+                _log.warning(
+                    "[LeaderWatchdog] leader session died (pid=%d, rc=%s), restarting",
+                    proc.pid,
+                    proc.returncode,
+                )
+                self.store.log(
+                    run_id, "warning",
+                    "leader session died, restarting",
+                    {
+                        "pid": proc.pid,
+                        "returncode": proc.returncode,
+                        "restart_count": self._leader_restart_count,
+                        "max_restarts": self._leader_max_restarts,
+                    },
+                )
+                # Attempt restart (increments _leader_restart_count inside)
+                self._start_leader_session(run_id)
+
+    def _run_direct(self, run_id: str, request: str, score, package: str | None, session_id: str | None, timeout: int) -> dict:
+        """Direct mode: leader answers immediately, no workers/WBS/aggregate.
+
+        For ``routing == "direct"``, the leader (hermes) responds directly.
+        This avoids spawning any opencode worker subprocess, creating WBS
+        nodes, or running the aggregate summarization step.
+        """
+        self._direct_mode = True
+        self.store.log(run_id, "info", "direct mode: leader answering directly")
+
+        started = time.time()
+        ok = False
+        stdout = ""
+        stderr = ""
+
+        # --- Try leader persistent session first ---
+        _leader = self._leader_session
+        _used_leader = False
+        if _leader is not None and _leader.get("proc") is not None and _leader["proc"].poll() is None:
+            try:
+                _msg = f"用户问题: {request}\n\n请直接回答:"
+                _leader["stdin"].write(_msg + "\n")
+                _leader["stdin"].flush()
+
+                import select as _sel
+                _sfd = _leader["stdout"]
+                _fd = _sfd.fileno()
+                _lines = []
+                _deadline = time.time() + min(timeout, 60)
+                _idle_limit = 2.0
+
+                while time.time() < _deadline:
+                    _r, _, _ = _sel.select([_fd], [], [], _idle_limit)
+                    if _r:
+                        _line = _sfd.readline()
+                        if not _line:
+                            break
+                        # Skip prompt lines that hermes may echo
+                        if _line.strip() in ("> ", ">", "") or _line.strip().startswith("> "):
+                            continue
+                        _lines.append(_line)
+                    else:
+                        # No more data — response complete
+                        break
+
+                _raw = "".join(_lines).strip()
+                # If we got a response, trim any trailing prompt artifacts
+                if _raw:
+                    stdout = _raw
+                    ok = True
+                    _used_leader = True
+            except Exception as _exc:
+                self.store.log(
+                    run_id, "warning",
+                    f"leader session read failed, falling back to one-shot: {_exc}",
+                )
+
+        # --- Fallback: one-shot Popen + communicate ---
+        if not _used_leader:
+            backend = self.leader_agent
+            # Build session context from past turns for conversational continuity
+            _session_ctx = ""
+            if session_id:
+                _past_turns = self.store.get_session_turns(session_id, limit=5)
+                if _past_turns:
+                    _turn_lines = []
+                    for _t in _past_turns:
+                        _req = str(_t.get("user_request", ""))[:200]
+                        _agg = str(_t.get("aggregate", ""))[:200]
+                        _turn_lines.append(f"  用户：{_req}")
+                        if _agg:
+                            _turn_lines.append(f"  回答：{_agg}")
+                    if _turn_lines:
+                        _session_ctx = "历史对话：\n" + "\n".join(_turn_lines) + "\n\n"
+            _prompt = (
+                f"{backend.prompt_prefix}\n\n"
+                f"你是一个智能助手，请直接回答用户的问题。\n\n"
+                f"{_session_ctx}"
+                f"用户问题: {request}\n\n"
+                f"回答:"
+            )
+            cmd = backend.build_command(
+                prompt=_prompt, model=self.leader_model,
+                allowed_tools=[], provider=self.provider, reasoning=False,
+            )
+            import subprocess as _sp
+            try:
+                proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE,
+                                 text=True, cwd=self.cwd)
+                _stdout, _stderr = proc.communicate(timeout=min(timeout, 60))
+                stdout = _stdout.strip()
+                stderr = _stderr.strip() if _stderr else ""
+                ok = proc.returncode == 0
+            except _sp.TimeoutExpired:
+                proc.kill()
+                _stdout, _stderr = proc.communicate(timeout=5)
+                ok = False
+                stdout = (_stdout or "") + "\n[timeout]"
+                stderr = _stderr.strip() if _stderr else ""
+            except FileNotFoundError:
+                ok = False
+                stdout = f"leader agent not found: {cmd[0]}"
+                stderr = ""
+
+        duration = time.time() - started
+        result_text = stdout.strip()
+
+        # Save result and finalize run
+        self.store.update_run(run_id, "completed" if ok else "failed")
+        self.store.log(run_id, "info" if ok else "error",
+                       "direct answer completed",
+                       {"ok": ok, "duration": round(duration, 1)})
+
+        # Insert a minimal WBS node so frontend _reconstructFromRun can find the result.
+        self.store.insert_wbs_node(run_id, {
+            "id": "direct-answer",
+            "title": "Direct answer",
+            "description": request,
+            "capability": "general",
+            "complexity": score.overall,
+            "dependencies": [],
+            "parallelizable": True,
+            "deliverable": "Direct answer",
+            "status": "completed" if ok else "failed",
+            "attempt": 1,
+            "checkpoint": False,
+        })
+        self.store.update_node_result(run_id, "direct-answer", result_text)
+
+        self.store.log(run_id, "info" if ok else "error",
+                       "run finished", {"ok": ok})
+
+        if session_id:
+            self.store.add_session_turn(session_id, run_id, request, result_text)
+
+        # Build WorkerResult-like dict for return
+        return {
+            "run_id": run_id,
+            "ok": ok,
+            "complexity": score.to_dict(),
+            "results": [],
+            "aggregate": {
+                "ok": ok,
+                "result": result_text,
+                "node_id": "direct-answer",
+                "duration_seconds": round(duration, 1),
+                "returncode": 0,
+                "stderr": stderr.strip() if stderr else "",
+            } if result_text else None,
+            "lessons_learned": [],
+        }
 
     # ------------------------------------------------------------------
     # v3: Checkpoint, risk detection, pause/resume, redo-node

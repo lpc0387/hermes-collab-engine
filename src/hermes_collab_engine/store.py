@@ -8,6 +8,19 @@ from typing import Any
 
 from .models import RiskPolicy
 
+# ── Node / Worker / Run status string constants ──
+NODE_STATUS_PENDING = "pending"
+NODE_STATUS_RUNNING = "running"
+NODE_STATUS_WAITING = "waiting"
+NODE_STATUS_LEADER_DECIDING = "leader_deciding"
+NODE_STATUS_COMPLETED = "completed"
+NODE_STATUS_FAILED = "failed"
+
+RUN_STATUS_CREATED = "created"
+RUN_STATUS_RUNNING = "running"
+RUN_STATUS_COMPLETED = "completed"
+RUN_STATUS_FAILED = "failed"
+
 SCHEMA = """PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY,title TEXT NOT NULL,request TEXT NOT NULL,status TEXT NOT NULL,complexity_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,completed_at TEXT);
 CREATE TABLE IF NOT EXISTS wbs_nodes (id TEXT NOT NULL,run_id TEXT NOT NULL,parent_id TEXT,title TEXT NOT NULL,description TEXT NOT NULL,capability TEXT NOT NULL,complexity INTEGER NOT NULL,dependencies_json TEXT NOT NULL DEFAULT '[]',parallelizable INTEGER NOT NULL DEFAULT 1,deliverable TEXT NOT NULL,status TEXT NOT NULL,attempt INTEGER NOT NULL DEFAULT 1,checkpoint INTEGER NOT NULL DEFAULT 0,result TEXT,session_id TEXT,duration_seconds REAL,error TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,brief TEXT DEFAULT '',shared_brief TEXT DEFAULT '',estimated_duration INTEGER DEFAULT NULL,write_targets_json TEXT DEFAULT '[]',result_struct_json TEXT DEFAULT NULL,skills_json TEXT DEFAULT NULL,tools_json TEXT DEFAULT NULL,fingerprint TEXT DEFAULT '',PRIMARY KEY (id, run_id),FOREIGN KEY(run_id) REFERENCES runs(id));
@@ -19,11 +32,32 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value_json TEXT NOT NU
 CREATE TABLE IF NOT EXISTS node_results (node_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,result_text TEXT DEFAULT '',result_struct_json TEXT DEFAULT NULL,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS run_state (run_id TEXT PRIMARY KEY,paused INTEGER DEFAULT 0,checkpoint_paused_nodes_json TEXT DEFAULT '[]',updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS context_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,snapshot_type TEXT NOT NULL,node_id TEXT DEFAULT NULL,snapshot_json TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,user_id TEXT NOT NULL DEFAULT 'default',title TEXT DEFAULT '',status TEXT DEFAULT 'active',created_at TEXT NOT NULL,updated_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS session_turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    user_request TEXT NOT NULL,
+    aggregate TEXT NOT NULL DEFAULT '',
+    turn_index INTEGER NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_session_turns_session ON session_turns(session_id, turn_index);
+CREATE TABLE IF NOT EXISTS run_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    file_mtime TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_run_files_run ON run_files(run_id);
 """
 
 
 class CollabStore:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, skip_cleanup: bool = False):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -38,13 +72,14 @@ class CollabStore:
         # CRITICAL: format MUST match SQLite CURRENT_TIMESTAMP ('YYYY-MM-DD HH:MM:SS')
         # so string comparison is correct.
         import datetime
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(datetime.timezone.utc)
         self._engine_start_ts = now.strftime("%Y-%m-%d %H:%M:%S")
         # Also keep a window (5s) for clock skew between cleanup check and insert
         import time as _time
         self._engine_start_ts_with_skew = now.strftime(
             "%Y-%m-%d %H:%M:%S"
         )  # use strict equality with created_at (no skew window)
+        self._skip_cleanup = skip_cleanup
         with self.lock:
             self.conn.executescript(SCHEMA)
             self._ensure_schema()
@@ -57,14 +92,18 @@ class CollabStore:
         #    ... SELECT *, and SELECT * will fail on columns that haven't
         #    been added to the old table yet.
         self._migrate_lessons_scope()
+        self._migrate_lessons_tags()
         self._migrate_wbs_checkpoint()
         self._migrate_wbs_context_fields()
         self._migrate_runs_agent()
         self._migrate_runs_meta_json()
+        self._migrate_runs_session_id()
+        self._migrate_session_turns_messages()
         # 2. Composite-PK migration last (it renames + recreates + drops)
         self._migrate_wbs_nodes_composite_pk()
         # 3. Stale-worker cleanup is safe to run after the schema is final
-        self._cleanup_stale_workers()
+        if not self._skip_cleanup:
+            self._cleanup_stale_workers()
 
     def _cleanup_stale_workers(self) -> None:
         """On startup, mark any orphaned 'running' workers as failed.
@@ -140,6 +179,11 @@ class CollabStore:
         if "scope" not in columns:
             self.conn.execute("ALTER TABLE lessons ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'")
 
+    def _migrate_lessons_tags(self) -> None:
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(lessons)").fetchall()}
+        if "tags" not in columns:
+            self.conn.execute("ALTER TABLE lessons ADD COLUMN tags TEXT DEFAULT '[]'")
+
     def _migrate_wbs_checkpoint(self) -> None:
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(wbs_nodes)").fetchall()}
         if "checkpoint" not in columns:
@@ -175,6 +219,32 @@ class CollabStore:
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)").fetchall()}
         if "meta_json" not in columns:
             self.conn.execute("ALTER TABLE runs ADD COLUMN meta_json TEXT NOT NULL DEFAULT '{}'")
+
+    def _migrate_runs_session_id(self) -> None:
+        """Add runs.session_id to link runs to sessions."""
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)").fetchall()}
+        if "session_id" not in columns:
+            self.conn.execute("ALTER TABLE runs ADD COLUMN session_id TEXT DEFAULT NULL")
+
+    def _migrate_session_turns_messages(self) -> None:
+        """Add messages_json and run_ids_json columns to session_turns.
+
+        These columns enable storing full message snapshots for each turn
+        and tracking all run IDs associated with a session.
+        """
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(session_turns)").fetchall()}
+        if "messages_json" not in columns:
+            try:
+                self.conn.execute("ALTER TABLE session_turns ADD COLUMN messages_json TEXT DEFAULT '[]'")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        if "run_ids_json" not in columns:
+            try:
+                self.conn.execute("ALTER TABLE session_turns ADD COLUMN run_ids_json TEXT DEFAULT '[]'")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
 
     def _migrate_wbs_nodes_composite_pk(self) -> None:
         """Migrate wbs_nodes to a composite PRIMARY KEY (id, run_id).
@@ -316,9 +386,9 @@ class CollabStore:
             nodes = []
         return {"run_id": row["run_id"], "paused": bool(row["paused"]), "checkpoint_paused_nodes": [str(node) for node in nodes]}
 
-    def create_run(self, run_id: str, title: str, request: str, complexity: dict[str, Any], agent: str = "claude-code") -> None:
-        self._execute("INSERT INTO runs(id,title,request,status,complexity_json,agent,created_at,updated_at) VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", (run_id, title, request, "created", json.dumps(complexity, ensure_ascii=False), agent))
-        self.log(run_id, "info", "run created", {"title": title, "agent": agent})
+    def create_run(self, run_id: str, title: str, request: str, complexity: dict[str, Any], agent: str = "claude-code", session_id: str | None = None) -> None:
+        self._execute("INSERT INTO runs(id,title,request,status,complexity_json,agent,session_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", (run_id, title, request, "created", json.dumps(complexity, ensure_ascii=False), agent, session_id))
+        self.log(run_id, "info", "run created", {"title": title, "agent": agent, "session_id": session_id})
 
     def update_run(self, run_id: str, status: str) -> None:
         completed_sql = ", completed_at=CURRENT_TIMESTAMP" if status in {"completed", "failed"} else ""
@@ -347,6 +417,149 @@ class CollabStore:
             return json.loads(raw)
         except json.JSONDecodeError:
             return {}
+
+    def create_session(self, user_id: str, title: str = "") -> dict[str, Any]:
+        import uuid
+        session_id = f"ses_{uuid.uuid4().hex[:12]}"
+        now = self._one("SELECT datetime('now','localtime')")[0]
+        self._execute(
+            "INSERT INTO sessions(id,user_id,title,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            (session_id, user_id, title, "active", now, now),
+        )
+        return {"id": session_id, "created_at": now}
+
+    def list_sessions(self, user_id: str) -> list[dict[str, Any]]:
+        rows = self._query(
+            """SELECT s.id, s.title, s.status, s.created_at, s.updated_at,
+                      r.id AS latest_run_id, r.status AS latest_run_status,
+                      r.created_at AS latest_run_created_at
+               FROM sessions s
+               LEFT JOIN runs r ON r.session_id = s.id
+                 AND r.id = (SELECT r2.id FROM runs r2 WHERE r2.session_id = s.id ORDER BY r2.created_at DESC LIMIT 1)
+               WHERE s.user_id = ?
+               ORDER BY s.updated_at DESC""",
+            (user_id,),
+        )
+        result = []
+        for row in rows:
+            session = {
+                "id": row["id"],
+                "title": row["title"] or "",
+                "status": row["status"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            if row["latest_run_id"]:
+                session["latest_run"] = {
+                    "id": row["latest_run_id"],
+                    "status": row["latest_run_status"],
+                    "created_at": row["latest_run_created_at"],
+                }
+            else:
+                session["latest_run"] = None
+            result.append(session)
+        return result
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            "SELECT id, user_id, title, status, created_at, updated_at FROM sessions WHERE id=?",
+            (session_id,),
+        )
+        if not row:
+            return None
+        session = dict(row)
+        latest = self._one(
+            "SELECT id, status, created_at FROM runs WHERE session_id=? ORDER BY created_at DESC LIMIT 1",
+            (session_id,),
+        )
+        session["latest_run"] = dict(latest) if latest else None
+        return session
+
+    def update_session(self, session_id: str, data: dict[str, Any]) -> dict[str, Any] | None:
+        allowed = {"title", "status"}
+        updates = {k: v for k, v in data.items() if k in allowed}
+        if not updates:
+            return self.get_session(session_id)
+        set_clause = ", ".join(f"{k}=?" for k in updates)
+        values = list(updates.values()) + [session_id]
+        self._execute(
+            f"UPDATE sessions SET {set_clause}, updated_at=datetime('now','localtime') WHERE id=?",
+            tuple(values),
+        )
+        return self.get_session(session_id)
+
+    def delete_session(self, session_id: str) -> bool:
+        cur = self._execute("DELETE FROM sessions WHERE id=?", (session_id,))
+        return cur.rowcount > 0
+
+    def add_session_turn(self, session_id: str, run_id: str, user_request: str, aggregate: str = "", messages: list | None = None) -> None:
+        turn_index = self._one(
+            "SELECT COALESCE(MAX(turn_index), 0) + 1 FROM session_turns WHERE session_id=?",
+            (session_id,),
+        )[0]
+        _messages_json = json.dumps(messages or [], ensure_ascii=False)
+        self._execute(
+            "INSERT INTO session_turns(session_id,run_id,user_request,aggregate,turn_index,messages_json) VALUES(?,?,?,?,?,?)",
+            (session_id, run_id, user_request, aggregate, turn_index, _messages_json),
+        )
+
+    def get_session_turns(self, session_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        rows = self._query(
+            "SELECT * FROM session_turns WHERE session_id=? ORDER BY turn_index DESC LIMIT ?",
+            (session_id, limit),
+        )
+        result = []
+        for r in reversed(rows):
+            turn = dict(r)
+            # Decode messages_json if present
+            raw_messages = turn.pop("messages_json", None) or "[]"
+            try:
+                turn["messages"] = json.loads(raw_messages) if isinstance(raw_messages, str) else (raw_messages or [])
+            except (json.JSONDecodeError, TypeError):
+                turn["messages"] = []
+            result.append(turn)
+        return result
+
+    def add_run_to_session(self, session_id: str, run_id: str) -> None:
+        """Associate a run_id with a session by adding it to run_ids_json.
+
+        If the session has no turns yet, this is a no-op.
+        The run_id is added to the latest turn's run_ids_json (deduplicated).
+        """
+        latest = self._one(
+            "SELECT id, run_ids_json FROM session_turns WHERE session_id=? ORDER BY turn_index DESC LIMIT 1",
+            (session_id,),
+        )
+        if not latest:
+            return
+        turn_id = latest["id"]
+        raw = latest["run_ids_json"] or "[]"
+        try:
+            run_ids = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except (json.JSONDecodeError, TypeError):
+            run_ids = []
+        if not isinstance(run_ids, list):
+            run_ids = []
+        if run_id not in run_ids:
+            run_ids.append(run_id)
+            self._execute(
+                "UPDATE session_turns SET run_ids_json=? WHERE id=?",
+                (json.dumps(run_ids, ensure_ascii=False), turn_id),
+            )
+
+    def save_run_files(self, run_id: str, files: list[dict]) -> None:
+        self._execute("DELETE FROM run_files WHERE run_id=?", (run_id,))
+        for f in files:
+            self._execute(
+                "INSERT INTO run_files(run_id,file_path,file_size,file_mtime) VALUES(?,?,?,?)",
+                (run_id, f["path"], f["size"], f["mtime"]),
+            )
+
+    def get_run_files(self, run_id: str) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._query(
+            "SELECT file_path,file_size,file_mtime FROM run_files WHERE run_id=? ORDER BY file_path",
+            (run_id,),
+        )]
 
     def latest_run_id(self) -> str | None:
         row = self._one("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1")
@@ -526,14 +739,20 @@ class CollabStore:
             return
         self._execute("""UPDATE wbs_nodes SET skills_json=COALESCE(?, skills_json), tools_json=COALESCE(?, tools_json), updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND id=?""", (skills_json, tools_json, run_id, node_id))
 
+    def update_node_description(self, run_id: str, node_id: str, description: str) -> None:
+        self._execute("UPDATE wbs_nodes SET description=?, updated_at=CURRENT_TIMESTAMP, status='pending', attempt=1 WHERE run_id=? AND id=?", (description, run_id, node_id))
+
     def worker_start(self, worker_id: str, run_id: str, node_id: str) -> None:
         self._execute("INSERT OR REPLACE INTO workers(id,run_id,node_id,status,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)", (worker_id, run_id, node_id, "running"))
 
     def worker_finish(self, worker_id: str, status: str, duration_seconds: float | None = None, session_id: str | None = None, error: str | None = None) -> None:
         self._execute("UPDATE workers SET status=?, duration_seconds=?, session_id=?, error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (status, duration_seconds, session_id, error, worker_id))
 
-    def add_lesson(self, category: str, lesson: str, evidence: dict[str, Any] | None = None, scope: str = "global") -> None:
-        self._execute("INSERT INTO lessons(scope,category,lesson,evidence_json,created_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)", (scope, category, lesson, json.dumps(evidence or {}, ensure_ascii=False)))
+    def add_lesson(self, category: str, lesson: str, evidence: dict[str, Any] | None = None, scope: str = "global", tags: list[str] | None = None) -> None:
+        self._execute(
+            "INSERT INTO lessons(scope,category,lesson,evidence_json,tags,created_at) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)",
+            (scope, category, lesson, json.dumps(evidence or {}, ensure_ascii=False), json.dumps(tags or [], ensure_ascii=False)),
+        )
 
     def deduplicate_lessons(self) -> int:
         """Remove duplicate lessons, keeping the newest per group.
@@ -580,7 +799,7 @@ class CollabStore:
         return {"runs": scalar("SELECT COUNT(*) FROM runs"), "running": scalar("SELECT COUNT(*) FROM runs WHERE status='running'"), "completed": scalar("SELECT COUNT(*) FROM runs WHERE status='completed'"), "failed": scalar("SELECT COUNT(*) FROM runs WHERE status='failed'"), "workers_running": scalar("SELECT COUNT(*) FROM workers WHERE status='running'"), "lessons": scalar("SELECT COUNT(*) FROM lessons")}
 
     def list_runs(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        columns = "id,title,status,created_at,updated_at,completed_at,agent,meta_json"
+        columns = "id,title,status,created_at,updated_at,completed_at,agent,meta_json,session_id"
         if status:
             rows = [dict(r) for r in self._query(f"SELECT {columns} FROM runs WHERE status=? ORDER BY created_at DESC LIMIT ?", (status, limit))]
         else:
@@ -646,7 +865,7 @@ class CollabStore:
         task_sets: list[dict[str, Any]] = []
         for run in runs:
             rid = run["id"]
-            counts = {"total": 0, "pending": 0, "running": 0, "completed": 0, "failed": 0, "skipped": 0}
+            counts = {"total": 0, "pending": 0, "running": 0, "waiting": 0, "leader_deciding": 0, "completed": 0, "failed": 0, "skipped": 0}
             for row in self._query("SELECT status, COUNT(*) AS count FROM wbs_nodes WHERE run_id=? GROUP BY status", (rid,)):
                 status = row["status"] or "pending"
                 count = int(row["count"])
@@ -678,7 +897,7 @@ class CollabStore:
         return [dict(r) for r in self._query(f"SELECT {columns} FROM wbs_nodes WHERE run_id=? ORDER BY id", (run_id,))]
 
     def run_detail(self, run_id: str, full: bool = True, log_limit: int = 200, include_workers: bool = True) -> dict[str, Any]:
-        run_columns = "*" if full else "id,title,status,created_at,updated_at,completed_at,agent"
+        run_columns = "*" if full else "id,title,status,created_at,updated_at,completed_at,agent,session_id"
         run = self._one(f"SELECT {run_columns} FROM runs WHERE id=?", (run_id,))
         nodes = self.get_nodes(run_id) if full else self.get_node_summaries(run_id)
         workers = [dict(r) for r in self._query("SELECT * FROM workers WHERE run_id=? ORDER BY started_at DESC", (run_id,))] if include_workers else []
@@ -792,3 +1011,22 @@ class CollabStore:
                 chains.append({"runs": chain_runs, "count": len(chain_runs)})
         chains.sort(key=lambda c: c["runs"][-1]["created_at"] if c["runs"] else "", reverse=True)
         return chains[:limit]
+
+
+def get_model_context_limit(model_name: str) -> int:
+    """常见模型的 context window 限制"""
+    limits = {
+        "deepseek-v4-flash": 65536,
+        "deepseek-v4": 65536,
+        "gpt-4": 8192,
+        "gpt-4-turbo": 128000,
+        "claude-3-opus": 200000,
+        "claude-3-sonnet": 200000,
+        "claude-4": 200000,
+        # 默认
+        "DEFAULT": 8192,
+    }
+    for key, val in limits.items():
+        if key in model_name.lower():
+            return val
+    return limits["DEFAULT"]

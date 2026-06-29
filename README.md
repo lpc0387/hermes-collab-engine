@@ -67,6 +67,20 @@ hermes-collab server --host 0.0.0.0 --port 8765 --cwd .
 | 数据库 | SQLite |
 | 协议代理 | Go (默认) / Python (备用) |
 
+## v3 Architecture Highlights
+
+v3 engine refactoring focuses on stability, observability, and session continuity. The public subset of the v3 features has been ported to Hermes Collab Engine.
+
+| Feature | Description | Key Files |
+|---------|-------------|-----------|
+| **Leader Persistent Session** | Leader session persistence for long-running tasks with checkpoint recovery | `leader/session.py` |
+| **Direct Mode Optimization** | Optimized direct execution path bypassing unnecessary overhead | `engine/direct.py` |
+| **Node State Tracking** | Granular task node state machine (pending/running/done/failed/skipped) | `engine/node_state.py` |
+| **Session Chain** | Cross-session linking for continuous conversational context | `engine/session_chain.py` |
+| **Context Truncation** | Intelligent context window management to avoid token overflow | `engine/context_truncation.py` |
+
+> **Benefits:** Resumable tasks, transparent execution status, continuous multi-turn context, and reduced token waste.
+
 ## CLI 快速参考
 
 ```bash
