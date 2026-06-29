@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .agents import get_backend, AgentBackend
+from .agents import get_backend, AgentBackend, SessionHandle
 from .models import Plan, RiskPolicy, CheckpointDecision, WBSNode, WorkerResult
 from .planner import Planner
 from .skills import SkillRegistry, get_default_registry
@@ -109,6 +109,7 @@ class CollabEngine:
         # Worker process tracking for resource-pressure killing
         self._worker_procs: dict[str, subprocess.Popen] = {}
         self._worker_procs_lock = threading.Lock()
+        self._worker_sessions: dict[str, SessionHandle] = {}
         self._recovery_attempts: dict[str, int] = {}
         self._resource_timeout_nodes: set[str] = set()
         # Leader persistent session (proc/stdin/stdout) and worker message queues
@@ -117,6 +118,9 @@ class CollabEngine:
         self._event_queue: queue.Queue = queue.Queue()
         self._leader_replies: dict[tuple[str, str], str] = {}
         self._running = False
+        # Idle timeout watchdog: 10 min inactivity → auto-pause + save agent session
+        self._idle_timeout = 600  # 10 minutes in seconds
+        self._session_last_active: dict[str, float] = {}  # session_id -> last active timestamp
         # Leader watchdog / auto-restart
         self._leader_available: bool = True
         self._leader_max_restarts: int = 3
@@ -350,6 +354,79 @@ class CollabEngine:
         }
         # 清理重启后残留的僵死 run 移至 server.py 启动时执行（引擎每请求创建一次，不能放这里）
 
+    def _touch_session(self, session_id: str | None) -> None:
+        """Update the last-active timestamp for a conversation session.
+
+        This prevents the idle watchdog from pausing the session's runs.
+        Also persists the touch to the DB.
+        """
+        if not session_id:
+            return
+        self._session_last_active[session_id] = time.time()
+        try:
+            self.store.touch_session(session_id)
+        except Exception:
+            pass  # best-effort
+
+    def _idle_watchdog(self) -> None:
+        """Background thread: every 30s check for idle sessions.
+
+        When a session has been idle for more than ``_idle_timeout`` seconds,
+        the watchdog closes all worker sessions, saves the agent_session_id
+        to the DB, marks the run as paused, and cleans up worker tracking.
+        """
+        while self._running:
+            time.sleep(30)
+            now = time.time()
+            expired = [
+                sid for sid, t in list(self._session_last_active.items())
+                if now - t > self._idle_timeout
+            ]
+            if not expired:
+                continue
+            for session_id in expired:
+                self._session_last_active.pop(session_id, None)
+                # Find all running runs for this session
+                try:
+                    rows = self.store._query(
+                        "SELECT id FROM runs WHERE session_id=? AND status='running'",
+                        (session_id,),
+                    )
+                except Exception:
+                    rows = []
+                for row in rows:
+                    run_id = row["id"]
+                    # Close all worker sessions and save their agent session IDs
+                    for node_id, handle in list(self._worker_sessions.items()):
+                        try:
+                            self.agent_backend.close_session(handle)
+                        except Exception:
+                            pass
+                        if handle.session_id:
+                            try:
+                                self.store.save_agent_session(session_id, handle.session_id)
+                            except Exception:
+                                pass
+                    # Clean up worker tracking
+                    with self._worker_procs_lock:
+                        self._worker_sessions.clear()
+                        self._worker_procs.clear()
+                    # Mark run as paused
+                    self._paused_runs.add(run_id)
+                    try:
+                        self.store._execute(
+                            "UPDATE wbs_nodes SET status='paused' WHERE run_id=? AND status IN ('running','pending')",
+                            (run_id,),
+                        )
+                        self.store.update_run(run_id, "paused")
+                        self.store.log(
+                            run_id, "warning",
+                            "run paused by idle watchdog",
+                            {"session_id": session_id, "idle_timeout": self._idle_timeout},
+                        )
+                    except Exception:
+                        pass
+
     def _restore_run_state(self, run_id: str) -> None:
         state = self.store.load_run_state(run_id)
         if not state:
@@ -458,6 +535,11 @@ class CollabEngine:
         self._running = True
         _evt_thread = threading.Thread(target=self._event_loop, daemon=True)
         _evt_thread.start()
+        # Start idle watchdog thread
+        _watchdog_thread = threading.Thread(target=self._idle_watchdog, daemon=True)
+        _watchdog_thread.start()
+        # Touch the session so watchdog knows this session is active
+        self._touch_session(session_id)
         # Persist package + the Skill collection it triggered so the dashboard
         # and downstream workers can see which scenario Leader picked.
         # If a package is set, also try to read its graph definition and
@@ -2386,38 +2468,79 @@ Output contract:
                 provider=self.provider,
                 reasoning=True,
             )
-        stdin_data = open(tmp_path, "r").read() if tmp_path else None
-        # 2026-06-19 fix: Use temp files instead of PIPE for stdout/stderr.
-        # PIPE-based proc.communicate() hangs forever if the subprocess forks
-        # a daemon that inherits the pipe FD — EOF never arrives. Temp files
-        # eliminate the dependency on pipe EOF entirely. The subprocess writes
-        # to files, so even if it forks daemon children, the files close properly
-        # when the subprocess exits. proc.communicate(timeout=T) then reliably
-        # raises TimeoutExpired.
-        import tempfile as _tf
-        _tmp_stdout = _tf.NamedTemporaryFile(mode="w+", suffix=".out", delete=False, encoding="utf-8")
-        _tmp_stderr = _tf.NamedTemporaryFile(mode="w+", suffix=".err", delete=False, encoding="utf-8")
-        _tmp_stdout_path = _tmp_stdout.name
-        _tmp_stderr_path = _tmp_stderr.name
-        run_kwargs = {
-            "cwd": self.cwd,
-            "env": self._env_for_role(role),
-            "text": True,
-            "stdout": _tmp_stdout,
-            "stderr": _tmp_stderr,
-            "start_new_session": True,
-        }
-        if use_stdin:
-            run_kwargs["input"] = stdin_data
+        # ── Persistent session or one-shot Popen ──
+        if backend.supports_sessions():
+            # Use persistent session (backend manages subprocess lifecycle)
+            import tempfile as _tf
+            _tmp_stdout = _tf.NamedTemporaryFile(mode="w+", suffix=".out", delete=False, encoding="utf-8")
+            _tmp_stderr = _tf.NamedTemporaryFile(mode="w+", suffix=".err", delete=False, encoding="utf-8")
+            _tmp_stdout_path = _tmp_stdout.name
+            _tmp_stderr_path = _tmp_stderr.name
+            _tmp_stdout.close()
+            _tmp_stderr.close()
+            # ── Check for saved agent session ID for resume ──
+            _saved_agent_sid: str | None = None
+            try:
+                _conv_row = self.store._one("SELECT session_id FROM runs WHERE id=?", (run_id,))
+                _conv_sid = _conv_row["session_id"] if _conv_row else None
+                if _conv_sid:
+                    _saved_agent_sid = self.store.get_agent_session(_conv_sid)
+            except Exception:
+                pass
+            if _saved_agent_sid:
+                handle = backend.create_session(
+                    prompt,
+                    cwd=str(self.cwd),
+                    model=selected_model,
+                    stdout_path=_tmp_stdout_path,
+                    stderr_path=_tmp_stderr_path,
+                    session_id=_saved_agent_sid,
+                )
+            else:
+                handle = backend.create_session(
+                    prompt,
+                    cwd=str(self.cwd),
+                    model=selected_model,
+                    stdout_path=_tmp_stdout_path,
+                    stderr_path=_tmp_stderr_path,
+                )
+            self._worker_sessions[node.id] = handle
+            proc = handle.proc
+            with self._worker_procs_lock:
+                self._worker_procs[node.id] = proc
         else:
-            run_kwargs["stdin"] = subprocess.DEVNULL
-        # Use Popen so external code can kill the process tree
-        proc = subprocess.Popen(cmd, **run_kwargs)
-        # Close the temp file handles in the parent so the subprocess is sole writer.
-        _tmp_stdout.close()
-        _tmp_stderr.close()
-        with self._worker_procs_lock:
-            self._worker_procs[node.id] = proc
+            stdin_data = open(tmp_path, "r").read() if tmp_path else None
+            # 2026-06-19 fix: Use temp files instead of PIPE for stdout/stderr.
+            # PIPE-based proc.communicate() hangs forever if the subprocess forks
+            # a daemon that inherits the pipe FD — EOF never arrives. Temp files
+            # eliminate the dependency on pipe EOF entirely. The subprocess writes
+            # to files, so even if it forks daemon children, the files close properly
+            # when the subprocess exits. proc.communicate(timeout=T) then reliably
+            # raises TimeoutExpired.
+            import tempfile as _tf
+            _tmp_stdout = _tf.NamedTemporaryFile(mode="w+", suffix=".out", delete=False, encoding="utf-8")
+            _tmp_stderr = _tf.NamedTemporaryFile(mode="w+", suffix=".err", delete=False, encoding="utf-8")
+            _tmp_stdout_path = _tmp_stdout.name
+            _tmp_stderr_path = _tmp_stderr.name
+            run_kwargs = {
+                "cwd": self.cwd,
+                "env": self._env_for_role(role),
+                "text": True,
+                "stdout": _tmp_stdout,
+                "stderr": _tmp_stderr,
+                "start_new_session": True,
+            }
+            if use_stdin:
+                run_kwargs["input"] = stdin_data
+            else:
+                run_kwargs["stdin"] = subprocess.DEVNULL
+            # Use Popen so external code can kill the process tree
+            proc = subprocess.Popen(cmd, **run_kwargs)
+            # Close the temp file handles in the parent so the subprocess is sole writer.
+            _tmp_stdout.close()
+            _tmp_stderr.close()
+            with self._worker_procs_lock:
+                self._worker_procs[node.id] = proc
         try:
             child_stdout, child_stderr = proc.communicate(timeout=timeout)
             duration = round(time.time() - started, 3)
@@ -2455,6 +2578,13 @@ Output contract:
         finally:
             with self._worker_procs_lock:
                 self._worker_procs.pop(node.id, None)
+            # Cleanup worker session if one was created
+            _handle = self._worker_sessions.pop(node.id, None)
+            if _handle is not None:
+                try:
+                    backend.close_session(_handle)
+                except Exception:
+                    pass
             for _p in (_tmp_stdout_path, _tmp_stderr_path):
                 try: os.unlink(_p)
                 except OSError: pass

@@ -99,6 +99,7 @@ class CollabStore:
         self._migrate_runs_meta_json()
         self._migrate_runs_session_id()
         self._migrate_session_turns_messages()
+        self._migrate_sessions_agent_session()
         # 2. Composite-PK migration last (it renames + recreates + drops)
         self._migrate_wbs_nodes_composite_pk()
         # 3. Stale-worker cleanup is safe to run after the schema is final
@@ -242,6 +243,27 @@ class CollabStore:
         if "run_ids_json" not in columns:
             try:
                 self.conn.execute("ALTER TABLE session_turns ADD COLUMN run_ids_json TEXT DEFAULT '[]'")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
+    def _migrate_sessions_agent_session(self) -> None:
+        """Add agent_session_id and last_active columns to sessions table.
+
+        agent_session_id stores the backend agent's persistent session ID so
+        that idle runs can be resumed without losing the agent's context.
+        last_active tracks the most recent user activity timestamp.
+        """
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "agent_session_id" not in columns:
+            try:
+                self.conn.execute("ALTER TABLE sessions ADD COLUMN agent_session_id TEXT DEFAULT ''")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        if "last_active" not in columns:
+            try:
+                self.conn.execute("ALTER TABLE sessions ADD COLUMN last_active TEXT DEFAULT ''")
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
@@ -476,7 +498,7 @@ class CollabStore:
         return session
 
     def update_session(self, session_id: str, data: dict[str, Any]) -> dict[str, Any] | None:
-        allowed = {"title", "status"}
+        allowed = {"title", "status", "agent_session_id", "last_active"}
         updates = {k: v for k, v in data.items() if k in allowed}
         if not updates:
             return self.get_session(session_id)
@@ -487,6 +509,27 @@ class CollabStore:
             tuple(values),
         )
         return self.get_session(session_id)
+
+    def save_agent_session(self, session_id: str, agent_session_id: str) -> None:
+        """Persist the backend agent's session ID for later resume."""
+        self._execute(
+            "UPDATE sessions SET agent_session_id=?, updated_at=datetime('now','localtime') WHERE id=?",
+            (agent_session_id, session_id),
+        )
+
+    def get_agent_session(self, session_id: str) -> str | None:
+        """Return the saved agent session ID for a session, if any."""
+        row = self._one("SELECT agent_session_id FROM sessions WHERE id=?", (session_id,))
+        if row and row["agent_session_id"]:
+            return row["agent_session_id"]
+        return None
+
+    def touch_session(self, session_id: str) -> None:
+        """Update last_active and updated_at for a session to now."""
+        self._execute(
+            "UPDATE sessions SET last_active=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?",
+            (session_id,),
+        )
 
     def delete_session(self, session_id: str) -> bool:
         cur = self._execute("DELETE FROM sessions WHERE id=?", (session_id,))
