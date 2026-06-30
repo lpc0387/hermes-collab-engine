@@ -37,6 +37,43 @@ Please keep one issue focused on one problem. Security vulnerabilities should no
 - Update docs and localization together when user-facing behavior changes. At minimum, note whether `README.md`, `README.en.md`, and `README.ja.md` need follow-up.
 - Include screenshots or API payload examples for dashboard-visible changes when practical.
 
+## README localization checklist
+
+The project maintains three README files in parallel:
+
+- `README.md` — Chinese (primary)
+- `README.en.md` — English
+- `README.ja.md` — Japanese
+
+Use this checklist when your PR touches any README to decide whether the other two files need a corresponding update.
+
+**Changes that should be reflected in all three files:**
+
+- [ ] New CLI command or flag added or removed
+- [ ] New API endpoint or changed response shape
+- [ ] New installation step or changed quick-start command
+- [ ] New top-level feature added to the highlights table
+- [ ] Changed default behavior (e.g. sandbox TTL, port, model env var)
+- [ ] Corrected factual error or outdated description
+
+**Changes that do not require immediate localization:**
+
+- Minor wording or formatting fixes within a single language
+- Adding or updating a code example that is language-neutral (copy it across if easy, skip if not)
+- Internal-only documentation (e.g. `sandbox/README.md`, `docs/`)
+
+**When you defer a translation:**
+
+Add a short note in your PR description, for example:
+
+> Localization follow-up deferred: `README.en.md` and `README.ja.md` need the new `--real` flag documented. Filed as a follow-up.
+
+This keeps the repo history honest without blocking your PR on translation work.
+
+**Verification:** Markdown lint only — no automated translation check is required.
+
+---
+
 ## Tests and verification
 
 Choose the smallest command that proves the change:
