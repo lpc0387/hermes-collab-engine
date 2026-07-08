@@ -646,12 +646,15 @@ def main() -> int:
 
         if args.cmd == "kill-node":
             from .agents import get_backend
+            from .config_store import load_with_migration
             # Determine which agent was used for this run
-            agent_name = row.get("agent") if "agent" in row.keys() else "claude-code"
+            _cfg = load_with_migration(".runtime-config.json") if os.path.exists(".runtime-config.json") else {}
+            _fallback_agent = _cfg.get("worker_agent", "opencode")
+            agent_name = row.get("agent") if "agent" in row.keys() else _fallback_agent
             try:
                 backend = get_backend(agent_name)
             except KeyError:
-                backend = get_backend("claude-code")
+                backend = get_backend(_fallback_agent)
             patterns = [args.node_id, f"WBS node: {row['title']}"]
             pid_map: dict[int, str] = {}
             for pattern in patterns:
