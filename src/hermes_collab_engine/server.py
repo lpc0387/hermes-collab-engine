@@ -14,7 +14,7 @@ INDEX_HTML = Path(__file__).resolve().parents[2] / "web" / "index.html"
 
 
 class DashboardServer:
-    def __init__(self, host: str, port: int, db_path: str, cwd: str, model: str | None = None, leader_model: str | None = None, worker_model: str | None = None, agent: str = "claude-code"):
+    def __init__(self, host: str, port: int, db_path: str, cwd: str, model: str | None = None, leader_model: str | None = None, worker_model: str | None = None, agent: str = "opencode"):
         self.host = host
         self.port = port
         self.db_path = db_path

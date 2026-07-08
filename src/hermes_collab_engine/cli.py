@@ -86,6 +86,8 @@ def main() -> int:
     run.add_argument("--leader-model", help="Leader brain model for planning and aggregation")
     run.add_argument("--worker-model", help="Worker brain model for coding workers")
     run.add_argument("--agent", default="opencode", help="Agent backend: opencode (default), claude-code, codex, hermes, or custom")
+    run.add_argument("--leader-agent", default=None, help="Leader agent (default: hermes)")
+    run.add_argument("--worker-agent", default=None, help="Worker agent (default: same as --agent)")
     run.add_argument("--concurrency", type=int, default=2, help="Per-run in-flight workers (threads in run's pool)")
     run.add_argument("--global-max-concurrent", type=int, default=4, help="Global cap on opencode worker processes across ALL runs. Prevents 4-run storm (4GB RAM death spiral).")
     run.add_argument("--timeout", type=int, default=86400)
@@ -308,6 +310,17 @@ def main() -> int:
     if args.cmd == "run":
         request = Path(args.request_file).read_text(encoding="utf-8") if args.request_file else " ".join(args.request)
         model, leader_model, worker_model = _model_options(args)
+        # Load config store for agent/provider defaults (CLI args override config)
+        _cfg_path = Path(args.cwd) / ".runtime-config.json"
+        _cfg = {}
+        if _cfg_path.exists():
+            try:
+                import json as _json
+                _cfg = _json.loads(_cfg_path.read_text())
+            except Exception:
+                pass
+        _cfg_agent = _cfg.get("worker_agent", "opencode")
+        agent = args.agent or _cfg_agent
         provider = None
         if args.provider:
             provider = ProviderProfile(
@@ -317,10 +330,18 @@ def main() -> int:
                 api_key=args.provider_api_key or "",
                 default_model=args.provider_model or model or "",
             )
+        elif _cfg.get("active_provider"):
+            # Load provider from config
+            _providers = _cfg.get("providers", {})
+            _act = _cfg["active_provider"]
+            if _act in _providers:
+                provider = ProviderProfile.from_dict({"name": _act, **_providers[_act]})
         engine = CollabEngine(
             args.db, args.cwd, model,
             leader_model=leader_model, worker_model=worker_model,
-            agent=args.agent, provider=provider,
+            agent=agent, provider=provider,
+            leader_agent=args.leader_agent or _cfg.get("leader_agent", "hermes"),
+            worker_agent=args.worker_agent or _cfg.get("worker_agent", agent),
             global_max_concurrent=getattr(args, 'global_max_concurrent', 4),
         )
         result = engine.run(
@@ -342,7 +363,16 @@ def main() -> int:
 
     if args.cmd == "server":
         model, leader_model, worker_model = _model_options(args)
-        DashboardServer(args.host, args.port, args.db, args.cwd, model, leader_model=leader_model, worker_model=worker_model, agent=args.agent).serve()
+        _cfg_path = Path(args.cwd) / ".runtime-config.json"
+        _cfg = {}
+        if _cfg_path.exists():
+            try:
+                import json as _json
+                _cfg = _json.loads(_cfg_path.read_text())
+            except Exception:
+                pass
+        _agent = args.agent or _cfg.get("worker_agent", "opencode")
+        DashboardServer(args.host, args.port, args.db, args.cwd, model, leader_model=leader_model, worker_model=worker_model, agent=_agent).serve()
         return 0
 
     if args.cmd == "status":

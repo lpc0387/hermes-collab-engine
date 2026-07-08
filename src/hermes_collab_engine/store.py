@@ -352,12 +352,13 @@ class CollabStore:
     def _query(self, sql: str, params: tuple = ()):
         sql = sql.replace("CURRENT_TIMESTAMP", "datetime('now','localtime')")
         with self.lock:
-            return self.conn.execute(sql, params).fetchall()
+            return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
 
     def _one(self, sql: str, params: tuple = ()):
         sql = sql.replace("CURRENT_TIMESTAMP", "datetime('now','localtime')")
         with self.lock:
-            return self.conn.execute(sql, params).fetchone()
+            r = self.conn.execute(sql, params).fetchone()
+            return dict(r) if r else None
 
     def _decode_json(self, value: Any, default: Any) -> Any:
         if value in (None, ""):
@@ -443,7 +444,7 @@ class CollabStore:
     def create_session(self, user_id: str, title: str = "") -> dict[str, Any]:
         import uuid
         session_id = f"ses_{uuid.uuid4().hex[:12]}"
-        now = self._one("SELECT datetime('now','localtime')")[0]
+        now = list(self._one("SELECT datetime('now','localtime') AS dt").values())[0]
         self._execute(
             "INSERT INTO sessions(id,user_id,title,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
             (session_id, user_id, title, "active", now, now),
@@ -536,10 +537,10 @@ class CollabStore:
         return cur.rowcount > 0
 
     def add_session_turn(self, session_id: str, run_id: str, user_request: str, aggregate: str = "", messages: list | None = None) -> None:
-        turn_index = self._one(
-            "SELECT COALESCE(MAX(turn_index), 0) + 1 FROM session_turns WHERE session_id=?",
+        turn_index = list(self._one(
+            "SELECT COALESCE(MAX(turn_index), 0) + 1 AS idx FROM session_turns WHERE session_id=?",
             (session_id,),
-        )[0]
+        ).values())[0]
         _messages_json = json.dumps(messages or [], ensure_ascii=False)
         self._execute(
             "INSERT INTO session_turns(session_id,run_id,user_request,aggregate,turn_index,messages_json) VALUES(?,?,?,?,?,?)",
@@ -838,7 +839,8 @@ class CollabStore:
 
     def overview(self) -> dict[str, Any]:
         def scalar(sql: str):
-            return self._one(sql)[0]
+            row = self._one(sql)
+            return list(row.values())[0] if row else 0
         return {"runs": scalar("SELECT COUNT(*) FROM runs"), "running": scalar("SELECT COUNT(*) FROM runs WHERE status='running'"), "completed": scalar("SELECT COUNT(*) FROM runs WHERE status='completed'"), "failed": scalar("SELECT COUNT(*) FROM runs WHERE status='failed'"), "workers_running": scalar("SELECT COUNT(*) FROM workers WHERE status='running'"), "lessons": scalar("SELECT COUNT(*) FROM lessons")}
 
     def list_runs(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
@@ -1039,8 +1041,8 @@ class CollabStore:
                 rid = queue.pop(0)
                 run = self._one("SELECT id,title,status,created_at FROM runs WHERE id=?", (rid,))
                 if run:
-                    node_count = self._one("SELECT COUNT(*) FROM wbs_nodes WHERE run_id=?", (rid,))[0]
-                    done_count = self._one("SELECT COUNT(*) FROM wbs_nodes WHERE run_id=? AND status='completed'", (rid,))[0]
+                    node_count = list(self._one("SELECT COUNT(*) AS c FROM wbs_nodes WHERE run_id=?", (rid,)).values())[0]
+                    done_count = list(self._one("SELECT COUNT(*) AS c FROM wbs_nodes WHERE run_id=? AND status='completed'", (rid,)).values())[0]
                     chain_runs.append({
                         "id": run["id"],
                         "title": (run["title"] or "")[:60],
