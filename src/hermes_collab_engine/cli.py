@@ -13,6 +13,232 @@ from .models import RiskPolicy, WBSNode
 from .provider import ProviderProfile
 from .server import DashboardServer
 
+# ── Dialog mode: default CLI entry point ───────────────────────────
+def _run_dialog(args: argparse.Namespace) -> int:
+    """Run the CLI dialog mode — detect agents, choose mode, execute tasks interactively."""
+    from .detector import detect_all_agents, format_health_report
+    from .cli_protocol import CLIGuardianProtocol
+
+    cwd = Path(getattr(args, 'cwd', '.')).resolve()
+    cwd.mkdir(parents=True, exist_ok=True)
+    quiet = getattr(args, 'quiet', False)
+    protocol = CLIGuardianProtocol(quiet=quiet)
+
+    # Step 1: Detect agents
+    if not quiet:
+        print("扫描已安装的 Agent...")
+
+    model = getattr(args, 'model', None) or os.environ.get("HERMES_COLLAB_MODEL")
+    # Use shorter detection timeout for CLI startup (5s per agent, 30s total)
+    health_results = detect_all_agents(model=model, timeout=10)
+
+    # Step 2: Print detection report
+    report = format_health_report(health_results)
+    print(report)
+
+    # Step 3: Choose mode
+    try:
+        mode_choice = input("").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n退出")
+        return 0
+
+    if mode_choice == "2":
+        mode = "leader"
+        # Leader mode: select worker agents
+        available = [h for h in health_results if h.installed]
+        if not available:
+            print("没有可用的 agent，请先安装至少一个")
+            return 1
+
+        print("\nWorker Agent 选择（可用 agent 前有 ✅）:")
+        for i, h in enumerate(available, 1):
+            status = "✅" if h.reachable else "⚠️"
+            model_str = h.model[:20] if h.model else "默认"
+            print(f"  [{i}] {h.display_name:<15} {status}  {model_str} ({h.latency_ms:.0f}ms)")
+
+        print("\n输入编号（可多选: 1,2 或 1-3）:")
+        try:
+            choices = input("").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n退出")
+            return 0
+
+        selected = _parse_agent_choices(choices, available)
+        if not selected:
+            print("未选择有效 agent，默认使用 opencode")
+            selected = ["opencode"]
+
+        worker_agents = ", ".join(selected)
+        print(f"  Worker agent: {worker_agents}")
+        print(f"  Leader mode 已就绪，输入任务开始 WBS 调度")
+    else:
+        mode = "no-leader"
+        print("  无领袖模式 — 你分配任务，各 agent 平权协作")
+        selected = [h.name for h in health_results if h.installed]
+
+    # Step 4: Dialog loop
+    print('')
+    print('─' * 55)
+    print('  请输入任务描述（或 /help 查看命令，Ctrl+C 退出）')
+    print('─' * 55)
+
+    while True:
+        try:
+            task = input("\n> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n退出")
+            break
+
+        if not task:
+            continue
+        if task == "/quit" or task == "/exit":
+            break
+        if task == "/help":
+            _print_dialog_help()
+            continue
+        if task == "/agents":
+            print(format_health_report(health_results))
+            continue
+        if task.startswith("/mode"):
+            parts = task.split()
+            if len(parts) > 1:
+                mode = "leader" if parts[1] == "leader" else "no-leader"
+                print(f"  切换到 {mode} 模式")
+            continue
+
+        # Execute task
+        if mode == "leader":
+            _run_leader_task(task, cwd, model, selected, protocol)
+        else:
+            _run_no_leader_task(task, cwd, model, selected, protocol)
+
+    return 0
+
+
+def _parse_agent_choices(choice_str: str, available: list) -> list[str]:
+    """Parse user agent selection like '1,2' or '1-3' or '1'."""
+    import re
+    result = []
+    choice_str = choice_str.strip()
+    if not choice_str:
+        return [available[0].name] if available else []
+
+    for part in re.split(r'[,，\s]+', choice_str):
+        part = part.strip()
+        if not part:
+            continue
+        if '-' in part:
+            try:
+                a, b = part.split('-', 1)
+                for i in range(int(a), int(b) + 1):
+                    if 1 <= i <= len(available):
+                        result.append(available[i - 1].name)
+            except ValueError:
+                pass
+        else:
+            try:
+                i = int(part)
+                if 1 <= i <= len(available):
+                    result.append(available[i - 1].name)
+            except ValueError:
+                pass
+
+    return result or [available[0].name]
+
+
+def _run_no_leader_task(task: str, cwd: Path, model: str | None,
+                        agents: list[str], protocol: object) -> None:
+    """No-Leader mode: dispatch directly via agent CLI."""
+    from .detector import detect_agent
+
+    for name in agents:
+        health = detect_agent(name, model=model)
+        if not health.installed:
+            print(f"  ⏭ [{name}] 未安装，跳过")
+            continue
+
+        print(f"  → [{name}] 开始执行: {task[:60]}...")
+        # Dispatch using built-in subprocess (not engine)
+        from .agents import get_backend
+        backend = get_backend(name)
+        cmd = backend.build_command(
+            prompt=task,
+            model=model,
+            allowed_tools=[],
+            provider=None,
+            reasoning=False,
+        )
+
+        import subprocess as _sp
+        import time as _time
+        _start = _time.time()
+        try:
+            proc = _sp.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(cwd))
+            _elapsed = _time.time() - _start
+            if proc.returncode == 0:
+                output = (proc.stdout or "").strip()[:500]
+                print(f"  → [{name}] ✅ 完成 ({_elapsed:.0f}s)")
+                if output:
+                    print(f"    └─ {output[:200]}")
+            else:
+                err = (proc.stderr or proc.stdout or "").strip()[:200]
+                print(f"  → [{name}] ❌ 失败 ({err})")
+        except _sp.TimeoutExpired:
+            print(f"  → [{name}] ❌ 超时 (300s)")
+        except Exception as e:
+            print(f"  → [{name}] ❌ {e}")
+
+
+def _run_leader_task(task: str, cwd: Path, model: str | None,
+                     agents: list[str], protocol: object) -> None:
+    """Leader mode: run via CollabEngine with Guardian CLI protocol."""
+    from .engine import CollabEngine
+
+    db_path = str(cwd / "data" / "collab.sqlite3")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+
+    engine = CollabEngine(
+        db_path, str(cwd), model,
+        agent=agents[0] if agents else "opencode",
+        worker_agent=agents[0] if agents else None,
+    )
+
+    print(f"  → 使用 worker: {', '.join(agents)}")
+    print(f"  → 引擎初始化完成，开始执行...\n")
+
+    result = engine.run(
+        task,
+        title=task[:80],
+        concurrency=min(len(agents), 4),
+        timeout=900,
+        max_retries=1,
+    )
+
+    if result.get("ok"):
+        print(f"\n✅ Run 完成: {result.get('run_id', '?')}")
+        if result.get("aggregate"):
+            summary = (result["aggregate"].get("result") or "")[:500]
+            if summary:
+                print(f"\n  结果: {summary}")
+    else:
+        print(f"\n❌ Run 失败: {result.get('run_id', '?')}")
+        agg = result.get("aggregate") or {}
+        print(f"  原因: {agg.get('result', 'unknown')[:200]}")
+
+
+def _print_dialog_help() -> None:
+    print("")
+    print("  命令:")
+    print("    <task>     执行任务")
+    print("    /help      显示此帮助")
+    print("    /quit      退出")
+    print("    /exit      退出")
+    print("    /agents    重新显示 agent 连通性")
+    print("    /mode no-leader|leader  切换模式")
+    print("")
+
+
 LESSON_SCOPES = ("global", "project", "run", "node", "wbs-family")
 RISK_POLICY_ACTIONS = {"auto", "notify", "pause"}
 
@@ -74,7 +300,14 @@ def _node_from_row(row) -> WBSNode:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="hermes-collab", description="Standalone Hermes-Claude collaboration engine")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub = parser.add_subparsers(dest="cmd")
+
+    # ── Dialog mode (default when no subcommand) ──────────────
+    dialog = sub.add_parser("dialog", help="[默认] 对话模式 — 连通性检测 + 双模式选择 + 交互式任务执行")
+    dialog.add_argument("--cwd", default=".", help="Working directory")
+    dialog.add_argument("--db", default="data/collab.sqlite3")
+    dialog.add_argument("--model", help="Default model for all agents")
+    dialog.add_argument("--quiet", action="store_true", help="减少 CLI 输出")
 
     run = sub.add_parser("run", help="Run a collaboration task")
     run.add_argument("request", nargs="*", help="Task request text")
@@ -307,6 +540,14 @@ def main() -> int:
     python_compat.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
+
+    # ── Default: dialog mode (no subcommand given) ──────────
+    if args.cmd is None:
+        return _run_dialog(args)
+
+    if args.cmd == "dialog":
+        return _run_dialog(args)
+
     if args.cmd == "run":
         request = Path(args.request_file).read_text(encoding="utf-8") if args.request_file else " ".join(args.request)
         model, leader_model, worker_model = _model_options(args)

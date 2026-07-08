@@ -813,7 +813,17 @@ tr.run-row:hover{background:var(--bg-2)}
 </header>
 
 <section class="submit-bar pix" aria-label="任务提交">
-  <form class="run-submit" id="runForm">
+  <div class="submit-field" style="display:none">
+    <div class="submit-models" aria-label="模型选择">
+      <label class="model-label">Leader 模型</label>
+      <input class="model-input" id="leaderModel" value="opencode-go/deepseek-v4-flash" readonly>
+      <label class="model-label">Worker 模型</label>
+      <input class="model-input" id="workerModel" value="opencode-go/deepseek-v4-flash" readonly>
+    </div>
+<div class="pane-readonly" style="padding:12px;background:var(--bg-1);border-radius:6px;margin-bottom:12px;text-align:center;border:1px solid var(--gold);color:var(--ink-2);font-size:13px">
+⚡ 只读监控面板 — 任务提交请使用 CLI 命令: <code style="color:var(--gold)">./hermes-collab</code>
+</div>
+  <form class="run-submit" id="runForm" style="display:none">
     <div class="submit-field">
       <textarea id="runRequest" rows="3" placeholder="输入任务描述，Ctrl+Enter 提交…" aria-label="任务描述"></textarea>
       <div class="submit-models" aria-label="模型选择">
