@@ -101,7 +101,7 @@ def main() -> int:
     run.add_argument("--provider-model", help="Provider default model (falls back to --model then env var)")
 
     server = sub.add_parser("server", help="Run management dashboard")
-    server.add_argument("--host", default="127.0.0.1")
+    server.add_argument("--host", default="0.0.0.0")
     server.add_argument("--port", type=int, default=8765)
     server.add_argument("--cwd", default=".")
     server.add_argument("--db", default="data/collab.sqlite3")

@@ -60,7 +60,21 @@ class CollabEngine:
         self.leader_model = leader_model or model or os.environ.get("HERMES_COLLAB_LEADER_MODEL") or env_model
         self.worker_model = worker_model or model or os.environ.get("HERMES_COLLAB_WORKER_MODEL") or env_model
         self.agent_backend: AgentBackend = get_backend(agent)
-        self.leader_agent: AgentBackend | None = get_backend(leader_agent) if leader_agent else None
+        self.leader_agent: AgentBackend | None = None
+        if leader_agent:
+            try:
+                _lead = get_backend(leader_agent)
+                # Verify the binary exists on PATH
+                import shutil as _shutil
+                _binary = _lead.command[0]
+                if _shutil.which(_binary) is None:
+                    print(f"warning: leader agent '{_binary}' not found on PATH, falling back to worker agent")
+                    self.leader_agent = None
+                else:
+                    self.leader_agent = _lead
+            except KeyError:
+                print(f"warning: unknown leader agent '{leader_agent}', falling back to worker agent", file=sys.stderr)
+                self.leader_agent = None
         self.worker_agent: AgentBackend | None = get_backend(worker_agent) if worker_agent else None
         self.provider = provider
         self.skill_registry = skill_registry or get_default_registry()
@@ -3021,7 +3035,17 @@ Output contract:
                         pass
 
         session_name = f"dt-leader-{run_id}"
-        cmd = ["hermes", "chat", "-q", "", "--resume", session_name, "--quiet"]
+        _lead_cmd = self.leader_agent.command[0] if self.leader_agent else None
+        if _lead_cmd is None:
+            # Fall back to worker agent if leader agent is unavailable
+            import shutil as _shutil
+            _cmp = self.agent_backend.command[0]
+            if _shutil.which(_cmp):
+                _lead_cmd = _cmp
+            else:
+                _log.warning("[LeaderSession] No leader or worker agent available, skipping leader session")
+                return False
+        cmd = [_lead_cmd, "chat", "-q", "", "--resume", session_name, "--quiet"]
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -3182,50 +3206,65 @@ Output contract:
 
         # --- Fallback: one-shot Popen + communicate ---
         if not _used_leader:
-            backend = self.leader_agent
-            # Build session context from past turns for conversational continuity
-            _session_ctx = ""
-            if session_id:
-                _past_turns = self.store.get_session_turns(session_id, limit=5)
-                if _past_turns:
-                    _turn_lines = []
-                    for _t in _past_turns:
-                        _req = str(_t.get("user_request", ""))[:200]
-                        _agg = str(_t.get("aggregate", ""))[:200]
-                        _turn_lines.append(f"  用户：{_req}")
-                        if _agg:
-                            _turn_lines.append(f"  回答：{_agg}")
-                    if _turn_lines:
-                        _session_ctx = "历史对话：\n" + "\n".join(_turn_lines) + "\n\n"
-            _prompt = (
-                f"{backend.prompt_prefix}\n\n"
-                f"你是一个智能助手，请直接回答用户的问题。\n\n"
-                f"{_session_ctx}"
-                f"用户问题: {request}\n\n"
-                f"回答:"
-            )
-            cmd = backend.build_command(
-                prompt=_prompt, model=self.leader_model,
-                allowed_tools=[], provider=self.provider, reasoning=False,
-            )
-            import subprocess as _sp
-            try:
-                proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE,
-                                 text=True, cwd=self.cwd)
-                _stdout, _stderr = proc.communicate(timeout=min(timeout, 60))
-                stdout = _stdout.strip()
-                stderr = _stderr.strip() if _stderr else ""
-                ok = proc.returncode == 0
-            except _sp.TimeoutExpired:
-                proc.kill()
-                _stdout, _stderr = proc.communicate(timeout=5)
+            backend = self.leader_agent or self.agent_backend
+            # Verify backend binary exists
+            import shutil as _shutil
+            _binary = backend.command[0]
+            if _shutil.which(_binary) is None:
+                self.store.log(run_id, "error", f"no available agent binary found (tried '{_binary}'), returning fallback")
+                stdout = f"No available agent binary found. Tried: '{_binary}'. Please install the CLI tool."
                 ok = False
-                stdout = (_stdout or "") + "\n[timeout]"
-                stderr = _stderr.strip() if _stderr else ""
-            except FileNotFoundError:
-                ok = False
-                stdout = f"leader agent not found: {cmd[0]}"
-                stderr = ""
+            else:
+                # Build session context from past turns for conversational continuity
+                _session_ctx = ""
+                if session_id:
+                    _past_turns = self.store.get_session_turns(session_id, limit=5)
+                    if _past_turns:
+                        _turn_lines = []
+                        for _t in _past_turns:
+                            _req = str(_t.get("user_request", ""))[:200]
+                            _agg = str(_t.get("aggregate", ""))[:200]
+                            _turn_lines.append(f"  用户：{_req}")
+                            if _agg:
+                                _turn_lines.append(f"  回答：{_agg}")
+                        if _turn_lines:
+                            _session_ctx = "历史对话：\n" + "\n".join(_turn_lines) + "\n\n"
+                _prompt = (
+                    f"{backend.prompt_prefix}\n\n"
+                    f"你是一个智能助手，请直接回答用户的问题。\n\n"
+                    f"{_session_ctx}"
+                    f"用户问题: {request}\n\n"
+                    f"回答:"
+                )
+                cmd = backend.build_command(
+                    prompt=_prompt, model=self.leader_model,
+                    allowed_tools=[], provider=self.provider, reasoning=False,
+                )
+                import subprocess as _sp
+                try:
+                    proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE,
+                                     text=True, cwd=self.cwd)
+                    _stdout, _stderr = proc.communicate(timeout=min(timeout, 60))
+                    stdout = _stdout.strip()
+                    stderr = _stderr.strip() if _stderr else ""
+                    ok = proc.returncode == 0
+                except _sp.TimeoutExpired:
+                    proc.kill()
+                    _stdout, _stderr = proc.communicate(timeout=5)
+                    ok = False
+                    stdout = (_stdout or "") + "\n[timeout]"
+                    stderr = _stderr.strip() if _stderr else ""
+                except FileNotFoundError:
+                    ok = False
+                    # Distinguish between binary not found and cwd not found
+                    import shutil as _shutil2
+                    if _shutil2.which(backend.command[0]) is None:
+                        stdout = f"leader agent not found: {backend.command[0]}"
+                    elif not os.path.isdir(self.cwd):
+                        stdout = f"cwd does not exist: {self.cwd}"
+                    else:
+                        stdout = f"failed to spawn {backend.command[0]} (unknown FileNotFoundError)"
+                    stderr = ""
 
         duration = time.time() - started
         result_text = stdout.strip()
