@@ -151,8 +151,24 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
                         agents: list[str], protocol: object) -> None:
     """No-Leader mode: dispatch directly via agent CLI."""
     from .detector import detect_agent
+    from .capabilities import infer_capability, select_best_agent
 
-    for name in agents:
+    # Infer capability and select best agent
+    cap = infer_capability(task)
+    if agents and len(agents) > 1:
+        selected = select_best_agent(cap, agents)
+        if selected:
+            agents_to_run = [selected]
+            other_agents = [a for a in agents if a != selected]
+            print(f"  🎯 能力匹配: {cap} → {selected}")
+        else:
+            agents_to_run = agents[:1]
+            other_agents = agents[1:]
+    else:
+        agents_to_run = agents[:1] if agents else ["opencode"]
+        other_agents = []
+
+    for name in agents_to_run:
         health = detect_agent(name, model=model)
         if not health.installed:
             print(f"  ⏭ [{name}] 未安装，跳过")
