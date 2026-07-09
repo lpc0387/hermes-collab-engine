@@ -65,7 +65,7 @@ class AgentBackend:
     provider: Any = None  # Optional ProviderProfile instance (imported lazily to avoid cycle)
     reasoning_flags: list[str] = field(default_factory=list)  # CLI flags for max reasoning, e.g. ["--variant", "max"]
     reasoning_env: dict[str, str] = field(default_factory=dict)  # Env vars for max reasoning
-    supported_skills: list[str] = field(default_factory=list)  # skill names this agent can use; empty = all
+    needs_pty: bool = False  # True if agent requires a pseudo-terminal
     supported_tools: list[str] = field(default_factory=list)   # tool/MCP profile names this agent can use; empty = all
     supported_skill_slots: list[str] = field(default_factory=lambda: [
         "implementation-focus", "test-verify", "search-verify",
@@ -310,6 +310,7 @@ _register_builtin(AgentBackend(
     capabilities=["file-edit", "git-ops"],
     reasoning_flags=[],
     reasoning_env={},
+    needs_pty=True,
 ))
 _register_builtin(AgentBackend(
     name="opencode",

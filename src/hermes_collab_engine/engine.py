@@ -3238,12 +3238,36 @@ Output contract:
                 )
                 import subprocess as _sp
                 try:
-                    proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE,
-                                     text=True, cwd=self.cwd)
-                    _stdout, _stderr = proc.communicate(timeout=min(timeout, 60))
-                    stdout = _stdout.strip()
-                    stderr = _stderr.strip() if _stderr else ""
-                    ok = proc.returncode == 0
+                    if getattr(backend, 'needs_pty', False):
+                        # PTY mode for agents like codex that require a terminal
+                        import pty as _pty, os as _os
+                        _master, _slave = _pty.openpty()
+                        proc = _sp.Popen(cmd, stdout=_slave, stderr=_slave,
+                                         stdin=_slave, close_fds=True, cwd=self.cwd)
+                        _os.close(_slave)
+                        _stdout_bytes = b""
+                        import select as _sel
+                        _deadline = time.time() + min(timeout, 60)
+                        while time.time() < _deadline and proc.poll() is None:
+                            _r, _, _ = _sel.select([_master], [], [], 0.5)
+                            if _r:
+                                _data = _os.read(_master, 4096)
+                                if not _data:
+                                    break
+                                _stdout_bytes += _data
+                        _os.close(_master)
+                        proc.wait(timeout=5)
+                        _stdout = _stdout_bytes.decode("utf-8", errors="replace")
+                        stdout = _stdout.strip()
+                        stderr = ""
+                        ok = proc.returncode == 0
+                    else:
+                        proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE,
+                                         text=True, cwd=self.cwd)
+                        _stdout, _stderr = proc.communicate(timeout=min(timeout, 60))
+                        stdout = _stdout.strip()
+                        stderr = _stderr.strip() if _stderr else ""
+                        ok = proc.returncode == 0
                 except _sp.TimeoutExpired:
                     proc.kill()
                     _stdout, _stderr = proc.communicate(timeout=5)
