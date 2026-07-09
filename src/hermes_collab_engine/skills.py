@@ -31,6 +31,10 @@ class SkillRegistry:
         self._skills: dict[str, SkillEntry] = {}
         self._load_builtin_skills()
 
+    def refresh(self) -> None:
+        """Reload builtin skills (no-op stub)."""
+        self._load_builtin_skills()
+
     def register(self, skill: SkillEntry) -> None:
         if not skill.name:
             raise ValueError("skill name is required")
