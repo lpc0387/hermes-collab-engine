@@ -258,39 +258,109 @@ def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
 
 def _run_leader_task(task: str, cwd: Path, model: str | None,
                      agents: list[str], protocol: object) -> None:
-    """Leader mode: run via CollabEngine with Guardian CLI protocol."""
-    from .engine import CollabEngine
+    """Leader mode: WBS + capability routing + guardian CLI + aggregator.
 
+    Uses engine's planner for decomposition and store for DB tracking,
+    but dispatches workers via NoLeaderDispatcher (bypasses engine.run's
+    broken hermes leader session).
+    """
+    from .engine import CollabEngine
+    from .no_leader import NoLeaderDispatcher
+    from .capabilities import select_best_agent, infer_capability
+    from .cli_protocol import CLIGuardianProtocol as _CP
+    import uuid as _uuid
+
+    proto = protocol if isinstance(protocol, _CP) else _CP()
     db_path = str(cwd / "data" / "collab.sqlite3")
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    engine = CollabEngine(
-        db_path, str(cwd), model,
+    # Create engine for planner + store
+    eng = CollabEngine(db_path, str(cwd), model,
         agent=agents[0] if agents else "opencode",
-        worker_agent=agents[0] if agents else None,
-    )
+        leader_agent=None, worker_agent=agents[0] if agents else None)
 
-    print(f"  → 使用 worker: {', '.join(agents)}")
-    print(f"  → 引擎初始化完成，开始执行...\n")
+    # 1. Assess complexity + decompose
+    score = eng.planner.assess(task)
+    overall = score.overall if hasattr(score, 'overall') else (score.get('overall', 5) if isinstance(score, dict) else 5)
+    print(f"  📊 复杂度评估: overall={overall}")
 
-    result = engine.run(
-        task,
-        title=task[:80],
-        concurrency=min(len(agents), 4),
-        timeout=900,
-        max_retries=1,
-    )
+    run_id = "run_" + _uuid.uuid4().hex[:12]
+    eng.store.create_run(run_id, task[:100], task, {"overall": overall},
+                         agent=agents[0] if agents else "opencode")
 
-    if result.get("ok"):
-        print(f"\n✅ Run 完成: {result.get('run_id', '?')}")
-        if result.get("aggregate"):
-            summary = (result["aggregate"].get("result") or "")[:500]
-            if summary:
-                print(f"\n  结果: {summary}")
+    if overall > 3:
+        plan = eng.planner.decompose(task, max_nodes=overall)
+        nodes = plan.nodes if plan and hasattr(plan, 'nodes') else []
     else:
-        print(f"\n❌ Run 失败: {result.get('run_id', '?')}")
-        agg = result.get("aggregate") or {}
-        print(f"  原因: {agg.get('result', 'unknown')[:200]}")
+        nodes = []
+
+    if not nodes or len(nodes) <= 1:
+        # Simple: single dispatch with guardian output
+        print(f"  → 单节点执行")
+        for ag in agents:
+            eng.store._execute("UPDATE runs SET agent=? WHERE id=?", (ag, run_id))
+            proto.emit_stream(run_id, f"dispatch to {ag}")
+            result = _dispatch_single(ag, task, cwd, model, prefix="    ")
+            if result and result.get("ok"):
+                proto.emit_completed(run_id, result.get("dur", 0))
+                eng.store._execute("UPDATE runs SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=?", (run_id,))
+                print(f"  ✅ Run {run_id} completed")
+                return
+            else:
+                err = result.get("stderr", "failed") if result else "no result"
+                proto.emit_error(run_id, err)
+        eng.store._execute("UPDATE runs SET status='failed', completed_at=CURRENT_TIMESTAMP WHERE id=?", (run_id,))
+        print(f"  ❌ Run {run_id} failed")
+        return
+
+    # 2. Multi-node WBS: show plan
+    print(f"  📋 WBS 分解: {len(nodes)} 个节点")
+    d = NoLeaderDispatcher(cwd=cwd, model=model)
+
+    for n in nodes:
+        cap = infer_capability(n.title, n.description or "")
+        best = select_best_agent(cap, agents)
+        print(f"    [{n.id:15s}] {best:15s} ({cap:15s}) {n.title[:40]}")
+
+    # 3. Execute nodes with guardian output
+    for n in nodes:
+        cap = infer_capability(n.title, n.description or "")
+        best = select_best_agent(cap, agents)
+
+        # DB tracking
+        node_dict = n.__dict__ if hasattr(n, '__dict__') else n.to_dict()
+        eng.store.insert_wbs_node(run_id, node_dict)
+        eng.store.update_node(n.id, "running", run_id=run_id)
+
+        # Guardian stream output
+        proto.emit_stream(n.id, f"→ {best}: {n.title}")
+
+        # Dispatch
+        result = _dispatch_single(best, n.description or n.title, cwd, model,
+                                  prefix=f"    [{n.id[:10]}] ")
+
+        if result and result.get("ok"):
+            eng.store.update_node(n.id, "completed", result.get("stdout", ""),
+                                  run_id=run_id, duration_seconds=result.get("dur", 0))
+            proto.emit_completed(n.id, result.get("dur", 0))
+        else:
+            err = result.get("stderr", "dispatch failed") if result else "no result"
+            eng.store.update_node(n.id, "failed", error=err, run_id=run_id)
+            proto.emit_error(n.id, err)
+
+    # 4. Aggregate results
+    all_nodes = eng.store._query(
+        "SELECT id, status FROM wbs_nodes WHERE run_id=?", (run_id,))
+    done = sum(1 for r in all_nodes if r.get("status") in ("completed", "failed"))
+    ok_count = sum(1 for r in all_nodes if r.get("status") == "completed")
+
+    if done == len(all_nodes) and ok_count > 0:
+        eng.store._execute("UPDATE runs SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=?", (run_id,))
+        proto.emit_aggregate(f"Run {run_id}: {ok_count}/{len(all_nodes)} nodes completed")
+        print(f"  ✅ Run {run_id} completed ({ok_count}/{len(all_nodes)} nodes OK)")
+    else:
+        eng.store._execute("UPDATE runs SET status='failed', completed_at=CURRENT_TIMESTAMP WHERE id=?", (run_id,))
+        print(f"  ❌ Run {run_id} failed ({ok_count}/{len(all_nodes)} OK)")
 
 
 def _print_dialog_help() -> None:
