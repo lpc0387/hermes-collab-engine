@@ -178,6 +178,7 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
         for name in agents:
             if not _dispatch_single(name, task, cwd, model):
                 break
+        eng.store._execute("UPDATE runs SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=?", (run_id,))
         return
 
     # Multi-node WBS: create run + dispatch each node
@@ -191,6 +192,9 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
         if not best:
             best = agents[0]
         print(f"    [{best}] {node.title} ({cap})")
+
+    # Dispatch results collected for peer review
+    dispatch_results: list[dict] = []
 
     for node in nodes:
         cap = node.capability
@@ -213,6 +217,75 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
             eng.store.update_node(node.id, "failed",
                 error="dispatch failed", run_id=run_id)
             proto.emit_error(node.id, "dispatch failed")
+
+        dispatch_results.append({
+            "node_id": node.id,
+            "node_title": node.title,
+            "agent": best,
+            "ok": result.get("ok", False) if result else False,
+            "stdout": (result.get("stdout", "") if result else "")[:2000],
+            "stderr": result.get("stderr", "") if result else "no result",
+        })
+
+    # ── Peer Review: each successful node reviewed by a different agent ──
+    print(f"\n  📋 互评开始...")
+    from .no_leader import NoLeaderDispatcher as _NLD
+    reviewer = _NLD(cwd=cwd, model=model)
+
+    for dr in dispatch_results:
+        if not dr["ok"]:
+            print(f"    ⏭ [{dr['node_id']}] 跳过（未完成）")
+            continue
+
+        # Pick a reviewer different from the original agent
+        reviewer_agent = None
+        for ag in agents:
+            if ag != dr["agent"]:
+                # Check if this reviewer is installed
+                import shutil as _su
+                from .agents import get_backend as _gb
+                try:
+                    _bin = _gb(ag).command[0]
+                    if isinstance(_bin, (list, tuple)):
+                        _bin = _bin[0]
+                    if _su.which(_bin):
+                        reviewer_agent = ag
+                        break
+                except Exception:
+                    continue
+
+        if reviewer_agent is None:
+            print(f"    ⏭ [{dr['node_id']}] 无可用的评审 agent")
+            continue
+
+        print(f"    [{dr['node_id']}] {reviewer_agent} 评审 {dr['agent']} 产出...", end=" ", flush=True)
+        from .no_leader import WorkerResult as _WR
+        review = reviewer.peer_review(
+            target_result=_WR(
+                agent=dr["agent"], ok=dr["ok"], stdout=dr["stdout"],
+                stderr=dr["stderr"], duration_s=0, node_id=dr["node_id"],
+                task=dr["node_title"],
+            ),
+            target_agent=dr["agent"],
+            reviewer_agent=reviewer_agent,
+            task_description=dr["node_title"],
+        )
+
+        verdict_icon = "✅" if review.verdict == "accept" else ("⚠️" if review.verdict == "needs_improvement" else "❌")
+        print(f"{verdict_icon} 评分={review.score}  verdict={review.verdict}")
+
+        # Store review result
+        eng.store._execute(
+            "INSERT INTO logs(run_id,node_id,level,message,data_json,created_at) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)",
+            (run_id, dr["node_id"], "review",
+             f"peer_review: {reviewer_agent} -> {dr['agent']}: {review.verdict} ({review.score}/10)",
+             __import__('json').dumps({"reviewer": reviewer_agent, "target": dr["agent"],
+                "verdict": review.verdict, "score": review.score,
+                "suggestions": review.suggestions}, ensure_ascii=False))
+        )
+
+        if review.verdict == "reject" and dr["ok"]:
+            print(f"      → 标记节点 {dr['node_id']} 为 needs_rework")
 
     eng.store._execute("UPDATE runs SET status=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
         ("completed", run_id))
