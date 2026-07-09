@@ -125,6 +125,7 @@ class Plan:
     nodes: list[WBSNode]
     shared_brief: str = ""
     risk_policy: dict[str, Any] = field(default_factory=dict)
+    task_type: str = "development"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Plan":

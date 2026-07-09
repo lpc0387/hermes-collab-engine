@@ -149,61 +149,111 @@ def _parse_agent_choices(choice_str: str, available: list) -> list[str]:
 
 def _run_no_leader_task(task: str, cwd: Path, model: str | None,
                         agents: list[str], protocol: object) -> None:
-    """No-Leader mode: dispatch directly via agent CLI."""
-    from .detector import detect_agent
+    """No-Leader mode: WBS decomposition + agent dispatch + DB tracking."""
+    from .engine import CollabEngine
     from .capabilities import infer_capability, select_best_agent
+    from .cli_protocol import CLIGuardianProtocol as _CP
+    proto = protocol if isinstance(protocol, _CP) else _CP()
 
-    # Infer capability and select best agent
-    cap = infer_capability(task)
-    if agents and len(agents) > 1:
-        selected = select_best_agent(cap, agents)
-        if selected:
-            agents_to_run = [selected]
-            other_agents = [a for a in agents if a != selected]
-            print(f"  🎯 能力匹配: {cap} → {selected}")
-        else:
-            agents_to_run = agents[:1]
-            other_agents = agents[1:]
+    # Create engine for DB + planner
+    db_path = str(cwd / "data" / "collab.sqlite3")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    eng = CollabEngine(db_path, str(cwd), model,
+        agent=agents[0] if agents else "opencode",
+        leader_agent=None, worker_agent=agents[0] if agents else None)
+
+    # Planner: decompose task into WBS nodes
+    score = eng.planner.assess(task)
+    overall = score.overall if hasattr(score, 'overall') else (score.get('overall', 5) if isinstance(score, dict) else 5)
+    if overall <= 3:
+        nodes = []
     else:
-        agents_to_run = agents[:1] if agents else ["opencode"]
-        other_agents = []
+        plan = eng.planner.decompose(task, max_nodes=overall)
+        nodes = plan.nodes if plan and hasattr(plan, 'nodes') else []
 
-    for name in agents_to_run:
-        health = detect_agent(name, model=model)
-        if not health.installed:
-            print(f"  ⏭ [{name}] 未安装，跳过")
-            continue
+    if not nodes or len(nodes) <= 1:
+        # Simple task: single dispatch, but still write to DB
+        run_id = "run_" + __import__('uuid').uuid4().hex[:12]
+        eng.store.create_run(run_id, task[:100], task, {"overall": overall}, agent=agents[0] if agents else "opencode")
+        for name in agents:
+            if not _dispatch_single(name, task, cwd, model):
+                break
+        return
 
-        print(f"  → [{name}] 开始执行: {task[:60]}...")
-        # Dispatch using built-in subprocess (not engine)
-        from .agents import get_backend
-        backend = get_backend(name)
-        cmd = backend.build_command(
-            prompt=task,
-            model=model,
-            allowed_tools=[],
-            provider=None,
-            reasoning=False,
-        )
+    # Multi-node WBS: create run + dispatch each node
+    run_id = "run_" + __import__('uuid').uuid4().hex[:12]
+    eng.store.create_run(run_id, task[:100], task, {"overall": overall}, agent=agents[0] if agents else "opencode")
 
-        import subprocess as _sp
-        import time as _time
-        _start = _time.time()
-        try:
-            proc = _sp.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(cwd))
-            _elapsed = _time.time() - _start
-            if proc.returncode == 0:
-                output = (proc.stdout or "").strip()[:500]
-                print(f"  → [{name}] ✅ 完成 ({_elapsed:.0f}s)")
-                if output:
-                    print(f"    └─ {output[:200]}")
-            else:
-                err = (proc.stderr or proc.stdout or "").strip()[:200]
-                print(f"  → [{name}] ❌ 失败 ({err})")
-        except _sp.TimeoutExpired:
-            print(f"  → [{name}] ❌ 超时 (300s)")
-        except Exception as e:
-            print(f"  → [{name}] ❌ {e}")
+    print(f"  📋 WBS: {len(nodes)} nodes")
+    for node in nodes:
+        cap = node.capability
+        best = select_best_agent(cap, agents)
+        if not best:
+            best = agents[0]
+        print(f"    [{best}] {node.title} ({cap})")
+
+    for node in nodes:
+        cap = node.capability
+        best = select_best_agent(cap, agents)
+        if not best:
+            best = agents[0]
+
+        # Insert WBS node to DB
+        eng.store.insert_wbs_node(run_id, node.to_dict())
+        eng.store.update_node(node.id, "running", run_id=run_id)
+
+        proto.emit_stream(node.id, f"dispatch to {best}...")
+        result = _dispatch_single(best, node.description or node.title, cwd, model, prefix=f"    [{node.id}] ")
+
+        if result:
+            eng.store.update_node(node.id, "completed",
+                result.get('stdout', ''), run_id=run_id)
+            proto.emit_completed(node.id, result.get('dur', 0))
+        else:
+            eng.store.update_node(node.id, "failed",
+                error="dispatch failed", run_id=run_id)
+            proto.emit_error(node.id, "dispatch failed")
+
+    eng.store._execute("UPDATE runs SET status=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+        ("completed", run_id))
+    print(f"  ✅ Run {run_id} completed")
+
+
+def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
+                     prefix: str = "  ", timeout: int = 300) -> dict | None:
+    """Dispatch a single task to an agent. Returns result dict or None on failure."""
+    import subprocess as _sp, time as _time, shutil as _shutil
+    from .agents import get_backend
+    try:
+        backend = get_backend(agent)
+    except KeyError:
+        print(f"{prefix}[{agent}] unknown agent")
+        return None
+    binary = backend.command[0] if isinstance(backend.command, (list, tuple)) else backend.command
+    if not _shutil.which(binary):
+        print(f"{prefix}[{agent}] not installed")
+        return None
+    cmd = backend.build_command(prompt=task, model=model, allowed_tools=[], provider=None, reasoning=False)
+    print(f"{prefix}[{agent}] executing...", end=" ", flush=True)
+    start = _time.time()
+    try:
+        proc = _sp.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(cwd))
+        elapsed = _time.time() - start
+        ok = proc.returncode == 0
+        out = (proc.stdout or "").strip()[:300]
+        if ok:
+            print(f"✅ ({elapsed:.0f}s)")
+            return {"ok": True, "stdout": out, "dur": round(elapsed, 1)}
+        else:
+            err = (proc.stderr or proc.stdout or "").strip()[:100]
+            print(f"❌ {err}")
+            return {"ok": False, "stderr": err, "dur": round(elapsed, 1)}
+    except _sp.TimeoutExpired:
+        print(f"❌ timeout")
+        return None
+    except Exception as e:
+        print(f"❌ {e}")
+        return None
 
 
 def _run_leader_task(task: str, cwd: Path, model: str | None,
