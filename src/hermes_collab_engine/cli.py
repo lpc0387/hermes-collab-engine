@@ -196,33 +196,59 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
     # Dispatch results collected for peer review
     dispatch_results: list[dict] = []
 
-    for node in nodes:
-        cap = node.capability
+    # Track node statuses for dependency resolution
+    node_status: dict[str, str] = {}
+
+    for n in nodes:
+        cap = infer_capability(n.title, n.description or "")
         best = select_best_agent(cap, agents)
-        if not best:
-            best = agents[0]
+
+        # Check dependencies: skip if any dependency failed
+        if n.dependencies:
+            failed_deps = [d for d in n.dependencies if node_status.get(d) == "failed"]
+            if failed_deps:
+                print(f"    ⏭ [{n.id}] 跳过（依赖节点 {failed_deps[0]} 失败）")
+                node_dict = n.__dict__ if hasattr(n, '__dict__') else n.to_dict()
+                eng.store.insert_wbs_node(run_id, node_dict)
+                eng.store.update_node(n.id, "skipped",
+                    error=f"dependency failed: {failed_deps[0]}", run_id=run_id)
+                node_status[n.id] = "skipped"
+                dispatch_results.append({
+                    "node_id": n.id, "node_title": n.title, "agent": best,
+                    "ok": False, "stdout": "", "stderr": f"depends on {failed_deps[0]}",
+                })
+                continue
 
         # Insert WBS node to DB
-        eng.store.insert_wbs_node(run_id, node.to_dict())
-        eng.store.update_node(node.id, "running", run_id=run_id)
+        node_dict = n.__dict__ if hasattr(n, '__dict__') else n.to_dict()
+        eng.store.insert_wbs_node(run_id, node_dict)
+        eng.store.update_node(n.id, "running", run_id=run_id)
 
-        proto.emit_stream(node.id, f"dispatch to {best}...")
-        result = _dispatch_single(best, node.description or node.title, cwd, model, prefix=f"    [{node.id}] ")
+        proto.emit_stream(n.id, f"dispatch to {best}...")
+        result = _dispatch_single(best, n.description or n.title, cwd, model, prefix=f"    [{n.id}] ")
 
         if result:
-            eng.store.update_node(node.id, "completed",
-                result.get('stdout', ''), run_id=run_id)
-            proto.emit_completed(node.id, result.get('dur', 0))
+            ok = result.get("ok", False)
+            eng.store.update_node(n.id, "completed" if ok else "failed",
+                result.get('stdout', ''), run_id=run_id,
+                duration_seconds=result.get('dur', 0),
+                error=None if ok else (result.get('stderr') or 'failed'))
+            if ok:
+                proto.emit_completed(n.id, result.get('dur', 0))
+            else:
+                proto.emit_error(n.id, result.get('stderr', 'failed'))
         else:
-            eng.store.update_node(node.id, "failed",
+            ok = False
+            eng.store.update_node(n.id, "failed",
                 error="dispatch failed", run_id=run_id)
-            proto.emit_error(node.id, "dispatch failed")
+            proto.emit_error(n.id, "dispatch failed")
 
+        node_status[n.id] = "completed" if ok else "failed"
         dispatch_results.append({
-            "node_id": node.id,
-            "node_title": node.title,
+            "node_id": n.id,
+            "node_title": n.title,
             "agent": best,
-            "ok": result.get("ok", False) if result else False,
+            "ok": ok,
             "stdout": (result.get("stdout", "") if result else "")[:2000],
             "stderr": result.get("stderr", "") if result else "no result",
         })
@@ -287,9 +313,27 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
         if review.verdict == "reject" and dr["ok"]:
             print(f"      → 标记节点 {dr['node_id']} 为 needs_rework")
 
+    # Determine run status based on node results
+    all_completed = all(node_status.get(n.id, "") == "completed" for n in nodes)
+    has_critical_failure = any(
+        node_status.get(n.id, "") == "failed"
+        for n in nodes
+        if any(d == n.id for dep in nodes for d in dep.dependencies) or not n.dependencies
+    )
+
+    if all_completed:
+        run_status = "completed"
+        status_icon = "✅"
+    elif has_critical_failure:
+        run_status = "failed"
+        status_icon = "❌"
+    else:
+        run_status = "completed"
+        status_icon = "⚠️"
+
     eng.store._execute("UPDATE runs SET status=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
-        ("completed", run_id))
-    print(f"  ✅ Run {run_id} completed")
+        (run_status, run_id))
+    print(f"  {status_icon} Run {run_id} {run_status} ({sum(1 for s in node_status.values() if s=='completed')}/{len(nodes)} nodes OK)")
 
 
 def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
