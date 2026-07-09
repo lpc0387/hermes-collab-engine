@@ -295,9 +295,9 @@ _register_builtin(AgentBackend(
 _register_builtin(AgentBackend(
     name="codex",
     display_name="Codex CLI",
-    command=["codex"],
-    prompt_flag="",  # codex takes prompt as positional arg, not --prompt flag
-    output_format_flags=[],
+    command=["codex", "exec"],
+    prompt_flag="",  # codex takes prompt as positional arg
+    output_format_flags=["--skip-git-repo-check"],
     supports_model_flag=True,
     model_flag="--model",
     permission_flags=None,
