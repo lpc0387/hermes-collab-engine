@@ -335,6 +335,40 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
         (run_status, run_id))
     print(f"  {status_icon} Run {run_id} {run_status} ({sum(1 for s in node_status.values() if s=='completed')}/{len(nodes)} nodes OK)")
 
+    # ── Write leader summary (for web dashboard 📓 button) ──
+    _summary_lines = [
+        f"# Leader 总结 · {run_id}",
+        f"",
+        f"## 任务",
+        f"{task[:200]}",
+        f"",
+        f"## WBS 节点",
+    ]
+    for n in nodes:
+        st = node_status.get(n.id, "?")
+        ic = "✅" if st == "completed" else ("❌" if st == "failed" else "⏭")
+        _summary_lines.append(f"- {ic} **{n.id}** ({n.capability}) {n.title}: {st}")
+
+    _summary_lines.extend([
+        f"",
+        f"## 结果",
+        f"Run 状态: {run_status}",
+        f"完成节点: {sum(1 for s in node_status.values() if s=='completed')}/{len(nodes)}",
+    ])
+
+    # Store summary as aggregate node result for the web frontend
+    _summary_text = "\n".join(_summary_lines)
+    _summary_data = {"summary": _summary_text, "markdown": _summary_text,
+                     "createdAt": __import__('time').strftime("%Y-%m-%d %H:%M:%S")}
+    # Save as run meta
+    _meta = {"summary": _summary_text, "created_at": __import__('time').strftime("%Y-%m-%d %H:%M:%S")}
+    eng.store._execute("UPDATE runs SET meta_json=? WHERE id=?", (__import__('json').dumps(_meta, ensure_ascii=False), run_id))
+    # Also insert as aggregate log entry so frontend finds it
+    eng.store._execute(
+        "INSERT INTO logs(run_id,node_id,level,message,data_json,created_at) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)",
+        (run_id, "aggregate", "info", "worker finished",
+         __import__('json').dumps(_summary_data, ensure_ascii=False)))
+
 
 def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
                      prefix: str = "  ", timeout: int = 300) -> dict | None:
