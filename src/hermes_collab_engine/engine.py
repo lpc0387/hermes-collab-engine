@@ -3038,7 +3038,8 @@ Output contract:
         _lead_cmd = self.leader_agent.command[0] if self.leader_agent else None
         if _lead_cmd is None:
             # No leader agent configured — user is the leader (v7.0 mode)
-            _log.info("[LeaderSession] No leader agent configured, skipping leader session (user-as-leader mode)")
+            import logging as _logging
+            _logging.getLogger(__name__).info("[LeaderSession] No leader agent configured, skipping leader session (user-as-leader mode)")
             return False
         cmd = [_lead_cmd, "chat", "-q", "", "--resume", session_name, "--quiet"]
         try:

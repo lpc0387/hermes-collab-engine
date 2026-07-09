@@ -83,7 +83,13 @@ class Planner:
 
     def _prefer_direct_for_simple(self, request: str, score: ComplexityScore) -> ComplexityScore:
         local = self._local_assess(request)
+        # Prefer local (heuristic) result if:
+        # 1. local says direct (override LLM over-estimation), OR
+        # 2. local says single/wbs but LLM says direct (LLM underestimates Chinese/vague tasks)
         if local.routing == "direct":
+            return local
+        if local.routing != "direct" and score.routing == "direct":
+            # LLM underestimated trust local (heuristic catches write verbs better)
             return local
         return score
 
