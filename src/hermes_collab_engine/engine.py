@@ -3263,6 +3263,22 @@ Output contract:
                         _os.close(_master)
                         proc.wait(timeout=5)
                         _stdout = _stdout_bytes.decode("utf-8", errors="replace")
+                        # Strip codex startup banner
+                        if getattr(backend, 'needs_pty', False):
+                            _lines = _stdout.split("\n")
+                            _clean_lines = []
+                            _in_banner = True
+                            for _l in _lines:
+                                if _in_banner:
+                                    if _l.strip() == "--------" or _l.strip().startswith("workdir:"):
+                                        continue
+                                    if "OpenAI Codex" in _l or "stdin" in _l:
+                                        continue
+                                    if _l.strip() == "":
+                                        continue
+                                    _in_banner = False
+                                _clean_lines.append(_l)
+                            _stdout = "\n".join(_clean_lines).strip()
                         stdout = _stdout.strip()
                         stderr = ""
                         ok = proc.returncode == 0

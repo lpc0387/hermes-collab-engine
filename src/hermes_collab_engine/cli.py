@@ -392,6 +392,11 @@ def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
     cmd = backend.build_command(prompt=task, model=model, allowed_tools=[], provider=None, reasoning=False)
     print(f"{prefix}[{agent}] 开始执行...", flush=True)
 
+    # Agent-specific output filters
+    _agent = agent
+    _filtered_codex_banner = _agent == "codex"
+    _codex_banner_count = 0
+
     start = _time.time()
     stdout_lines = []
     stderr_lines = []
@@ -424,7 +429,26 @@ def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
                         last_output_time = now
                         # Print live output with prefix
                         if _line_s.strip():
-                            print(f"{prefix}  {_line_s[:200]}", flush=True)
+                            _line_out = _line_s[:200]
+                            # Filter codex startup banner
+                            if _filtered_codex_banner:
+                                if _codex_banner_count < 3:
+                                    if 'OpenAI Codex' in _line_s or _line_s == '--------' or _line_s.startswith('workdir:') or _line_s.startswith('model:') or _line_s.startswith('provider:') or _line_s.startswith('approval:') or _line_s.startswith('sandbox:') or _line_s.startswith('reasoning') or _line_s.startswith('session id') or _line_s == 'Reading additional input from stdin...':
+                                        _codex_banner_count += 1
+                                        continue
+                                elif _codex_banner_count == 3:
+                                    _codex_banner_count += 1
+                                    continue
+                            # Parse and clean claude-code JSON output
+                            if _agent in ("claude-code", "claude") and _line_s.startswith("{"):
+                                try:
+                                    _j = __import__('json').loads(_line_s)
+                                    _result = _j.get("result") or _j.get("text") or _j.get("message","")
+                                    if _result:
+                                        _line_out = _result[:200]
+                                except (__import__('json').JSONDecodeError, Exception):
+                                    pass
+                            print(f"{prefix}  {_line_out}", flush=True)
 
             if proc.stderr:
                 _r2, _, _ = _sel.select([proc.stderr], [], [], 0)
