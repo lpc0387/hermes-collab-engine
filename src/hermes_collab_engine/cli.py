@@ -430,15 +430,6 @@ def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
                         # Print live output with prefix
                         if _line_s.strip():
                             _line_out = _line_s[:200]
-                            # Filter codex startup banner
-                            if _filtered_codex_banner:
-                                if _codex_banner_count < 3:
-                                    if 'OpenAI Codex' in _line_s or _line_s == '--------' or _line_s.startswith('workdir:') or _line_s.startswith('model:') or _line_s.startswith('provider:') or _line_s.startswith('approval:') or _line_s.startswith('sandbox:') or _line_s.startswith('reasoning') or _line_s.startswith('session id') or _line_s == 'Reading additional input from stdin...':
-                                        _codex_banner_count += 1
-                                        continue
-                                elif _codex_banner_count == 3:
-                                    _codex_banner_count += 1
-                                    continue
                             # Parse and clean claude-code JSON output
                             if _agent in ("claude-code", "claude") and _line_s.startswith("{"):
                                 try:
@@ -458,6 +449,10 @@ def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
                         _line_s = _line.rstrip("\n\r")
                         stderr_lines.append(_line_s)
                         if _line_s.strip():
+                            # Filter codex stderr banner
+                            if _filtered_codex_banner and _codex_banner_count < 15:
+                                _codex_banner_count += 1
+                                continue
                             _brief = _line_s[:150]
                             print(f"{prefix}  ⚠ {_brief}", flush=True)
 
