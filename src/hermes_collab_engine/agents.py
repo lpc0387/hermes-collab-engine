@@ -393,7 +393,7 @@ _o.session_send = _opencode_session_send
 _register_builtin(AgentBackend(
     name="hermes",
     display_name="Hermes Agent",
-    command=["hermes"],
+    command=["hermes", "--provider", "opencode-go"],
     prompt_flag="-z",
     output_format_flags=[],
     supports_model_flag=True,
