@@ -294,8 +294,13 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
 
 def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
                      prefix: str = "  ", timeout: int = 300) -> dict | None:
-    """Dispatch a single task to an agent. Returns result dict or None on failure."""
-    import subprocess as _sp, time as _time, shutil as _shutil
+    """Dispatch a single task to an agent. Streams output in real-time.
+
+    Shows worker stdout/stderr live during execution.
+    Asks user for interrupt decision if worker stalls.
+    Returns result dict or None on failure.
+    """
+    import subprocess as _sp, time as _time, shutil as _shutil, select as _sel, sys as _sys
     from .agents import get_backend
     try:
         backend = get_backend(agent)
@@ -307,25 +312,104 @@ def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
         print(f"{prefix}[{agent}] not installed")
         return None
     cmd = backend.build_command(prompt=task, model=model, allowed_tools=[], provider=None, reasoning=False)
-    print(f"{prefix}[{agent}] executing...", end=" ", flush=True)
+    print(f"{prefix}[{agent}] 开始执行...", flush=True)
+
     start = _time.time()
+    stdout_lines = []
+    stderr_lines = []
+    last_output_time = start
+    attention_interval = 30  # seconds between attention checks
+
     try:
-        proc = _sp.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(cwd))
+        proc = _sp.Popen(
+            cmd,
+            stdout=_sp.PIPE,
+            stderr=_sp.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=str(cwd),
+        )
+
+        # Poll loop: read output + check for stalls
+        while proc.poll() is None:
+            now = _time.time()
+            elapsed = now - start
+
+            # Read available stdout/stderr
+            if proc.stdout:
+                _r, _, _ = _sel.select([proc.stdout], [], [], 0.5)
+                if _r:
+                    _line = proc.stdout.readline()
+                    if _line:
+                        _line_s = _line.rstrip("\n\r")
+                        stdout_lines.append(_line_s)
+                        last_output_time = now
+                        # Print live output with prefix
+                        if _line_s.strip():
+                            print(f"{prefix}  {_line_s[:200]}", flush=True)
+
+            if proc.stderr:
+                _r2, _, _ = _sel.select([proc.stderr], [], [], 0)
+                if _r2:
+                    _line = proc.stderr.readline()
+                    if _line:
+                        _line_s = _line.rstrip("\n\r")
+                        stderr_lines.append(_line_s)
+                        if _line_s.strip():
+                            _brief = _line_s[:150]
+                            print(f"{prefix}  ⚠ {_brief}", flush=True)
+
+            # Attention check: stall detection
+            _idle = now - last_output_time
+            if _idle > attention_interval and elapsed > 60:
+                print(f"{prefix}  [{_YELLOW}GUARDIAN{_RESET}] "
+                      f"{_YELLOW}⚠️ worker 已静默 {_idle:.0f}s（总运行 {elapsed:.0f}s）{_RESET}", flush=True)
+                try:
+                    choice = input(f"{prefix}  是否中断 worker？[y/N] ").strip().lower()
+                    if choice in ("y", "yes"):
+                        proc.kill()
+                        proc.wait(timeout=5)
+                        print(f"{prefix}  [{_RED}已中断{_RESET}]", flush=True)
+                        stdout = "\n".join(stdout_lines[-50:])
+                        return {"ok": False, "stdout": stdout, "stderr": "interrupted by user",
+                                "dur": round(_time.time() - start, 1)}
+                except (EOFError, KeyboardInterrupt):
+                    pass
+                last_output_time = now  # Reset after check
+
+            # Hard timeout
+            if elapsed > timeout:
+                print(f"{prefix}  [{_YELLOW}GUARDIAN{_RESET}] "
+                      f"{_YELLOW}⏰ 超过超时限制 {timeout}s，终止...{_RESET}", flush=True)
+                proc.kill()
+                proc.wait(timeout=5)
+                stdout = "\n".join(stdout_lines[-50:])
+                return {"ok": False, "stdout": stdout, "stderr": f"timeout after {timeout}s",
+                        "dur": round(elapsed, 1)}
+
+        # Process completed
+        remaining_stdout, remaining_stderr = proc.communicate(timeout=5)
+        if remaining_stdout:
+            stdout_lines.append(remaining_stdout.strip())
+        if remaining_stderr:
+            stderr_lines.append(remaining_stderr.strip())
+
         elapsed = _time.time() - start
         ok = proc.returncode == 0
-        out = (proc.stdout or "").strip()[:300]
+        stdout = "\n".join(stdout_lines)
+        stderr = "\n".join(stderr_lines)
+
         if ok:
-            print(f"✅ ({elapsed:.0f}s)")
-            return {"ok": True, "stdout": out, "dur": round(elapsed, 1)}
+            print(f"{prefix}  [{_GREEN}完成{_RESET}] ({elapsed:.0f}s)", flush=True)
         else:
-            err = (proc.stderr or proc.stdout or "").strip()[:100]
-            print(f"❌ {err}")
-            return {"ok": False, "stderr": err, "dur": round(elapsed, 1)}
-    except _sp.TimeoutExpired:
-        print(f"❌ timeout")
-        return None
+            _err = (stderr or stdout)[:100]
+            print(f"{prefix}  [{_RED}失败{_RESET}] ({_err})", flush=True)
+
+        return {"ok": ok, "stdout": stdout[:3000], "stderr": stderr[:500],
+                "dur": round(elapsed, 1)}
+
     except Exception as e:
-        print(f"❌ {e}")
+        print(f"{prefix}  [{_RED}异常{_RESET}] {e}", flush=True)
         return None
 
 
@@ -450,6 +534,12 @@ def _print_dialog_help() -> None:
 
 LESSON_SCOPES = ("global", "project", "run", "node", "wbs-family")
 RISK_POLICY_ACTIONS = {"auto", "notify", "pause"}
+
+# ANSI colors for guardian output
+_YELLOW = "\033[33m"
+_RED = "\033[31m"
+_GREEN = "\033[32m"
+_RESET = "\033[0m"
 
 
 def _model_options(args):
