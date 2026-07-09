@@ -18,6 +18,7 @@ import json
 import shutil
 import subprocess
 from dataclasses import dataclass, field, asdict
+from io import TextIOBase as TextIO
 from typing import Any
 
 if __name__ != "__main__":
@@ -25,6 +26,20 @@ if __name__ != "__main__":
     from .provider import ProviderProfile as _ProviderProfile
 else:
     _ProviderProfile = None  # type: ignore[assignment,misc]
+
+
+@dataclass
+class SessionHandle:
+    """Handle for a persistent agent session.
+
+    Each agent type implements session management differently;
+    the engine uses this handle to send messages to the session.
+    """
+    session_id: str
+    proc: subprocess.Popen | None = None
+    stdin: TextIO | None = None
+    stdout: TextIO | None = None
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -190,6 +205,50 @@ class AgentBackend:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    # ── Persistent session support ─────────────────────────────────────
+    def supports_sessions(self) -> bool:
+        """Whether this backend supports persistent sessions."""
+        return getattr(self, '_supports_sessions', False)
+
+    def create_session(self, prompt: str, **kwargs) -> SessionHandle:
+        """Start a persistent agent session with the given initial prompt.
+
+        Returns a SessionHandle that can be used to send messages later.
+        The default raises NotImplementedError — backends that support
+        sessions must override this method.
+
+        Kwargs may include:
+          - session_id: str  — preferred session ID (if agent supports it)
+          - port: int        — for server-mode agents (opencode serve)
+          - model: str       — model override
+          - cwd: str         — working directory
+        """
+        raise NotImplementedError(
+            f"{self.name} does not support persistent sessions"
+        )
+
+    def session_send(self, handle: SessionHandle, message: str) -> None:
+        """Send a message to an existing persistent session.
+
+        The message is delivered as a new user message in the agent's
+        conversation, so the LLM naturally sees it on its next call.
+        """
+        raise NotImplementedError(
+            f"{self.name} does not support session messaging"
+        )
+
+    def close_session(self, handle: SessionHandle) -> None:
+        """Close/destroy a persistent session and release resources."""
+        if handle.proc and handle.proc.poll() is None:
+            try:
+                handle.proc.terminate()
+                handle.proc.wait(timeout=5)
+            except Exception:
+                try:
+                    handle.proc.kill()
+                except Exception:
+                    pass
+
 
 # ---------------------------------------------------------------------------
 # Built-in backend registry
@@ -237,7 +296,7 @@ _register_builtin(AgentBackend(
     name="codex",
     display_name="Codex CLI",
     command=["codex"],
-    prompt_flag="--prompt",
+    prompt_flag="",  # codex takes prompt as positional arg, not --prompt flag
     output_format_flags=[],
     supports_model_flag=True,
     model_flag="--model",
@@ -272,6 +331,64 @@ _register_builtin(AgentBackend(
     reasoning_env={},
     auto_prefix="opencode-go/",
 ))
+# 为 opencode backend 注入持久会话能力（基于 continue session）
+_o = _BUILTINS["opencode"]
+_o._supports_sessions = True
+
+def _opencode_create_session(prompt: str, **kw) -> SessionHandle:
+    import subprocess as _sp
+    import uuid
+    sid = kw.get("session_id", "worker-" + uuid.uuid4().hex[:8])
+    cmd = ["opencode", "run", prompt]
+    model = kw.get("model")
+    if model:
+        cmd.extend(["--model", model])
+    # 如果传入了 stdout/stderr 文件路径，重定向输出到文件（guardian 监控）
+    stdout_path = kw.get("stdout_path")
+    stderr_path = kw.get("stderr_path")
+    _stdout = open(stdout_path, "w", encoding="utf-8") if stdout_path else _sp.PIPE
+    _stderr = open(stderr_path, "w", encoding="utf-8") if stderr_path else _sp.PIPE
+    proc = _sp.Popen(
+        cmd,
+        stdin=_sp.DEVNULL, stdout=_stdout, stderr=_stderr,
+        text=True,
+    )
+    if not stdout_path:
+        _stdout.close() if hasattr(_stdout, 'close') else None
+    return SessionHandle(session_id=sid, proc=proc, meta={"type": "opencode", "model": model or "", "_pending_sid": True})
+
+_o.create_session = _opencode_create_session
+
+def _opencode_ensure_session_id(handle: SessionHandle) -> str:
+    """确保 opencode 会话 ID 已就绪。
+    首次运行时 opencode 创建了会话，需要通过 session list 获取 ID。
+    """
+    if not handle.meta.get("_pending_sid"):
+        return handle.session_id
+    import subprocess as _sp
+    try:
+        result = _sp.run(["opencode", "session", "list", "--json"], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and result.stdout.strip():
+            import json
+            sessions = json.loads(result.stdout)
+            if isinstance(sessions, list) and sessions:
+                handle.session_id = sessions[-1].get("id", handle.session_id)
+    except Exception:
+        pass
+    handle.meta["_pending_sid"] = False
+    return handle.session_id
+
+def _opencode_session_send(handle: SessionHandle, message: str) -> None:
+    import subprocess as _sp
+    sid = _opencode_ensure_session_id(handle)
+    cmd = ["opencode", "run", "-s", sid, message]
+    model = handle.meta.get("model", "")
+    if model:
+        cmd.extend(["--model", model])
+    _sp.Popen(cmd, stdin=_sp.DEVNULL, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+
+_o.session_send = _opencode_session_send
+
 _register_builtin(AgentBackend(
     name="hermes",
     display_name="Hermes Agent",
@@ -291,6 +408,38 @@ _register_builtin(AgentBackend(
     reasoning_flags=[],
     reasoning_env={"HERMES_REASONING_EFFORT": "high"},
 ))
+# 为 hermes backend 注入持久会话能力
+_h = _BUILTINS["hermes"]
+_h._supports_sessions = True
+
+def _hermes_create_session(prompt: str, **kw) -> SessionHandle:
+    import subprocess as _sp
+    import uuid
+    sid = kw.get("session_id", "worker-" + uuid.uuid4().hex[:8])
+    quiet = kw.get("quiet", True)
+    cmd = ["hermes", "chat", "-q", "", "--resume", sid]
+    if quiet:
+        cmd.append("--quiet")
+    proc = _sp.Popen(
+        cmd,
+        stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE,
+        text=True, bufsize=1,
+    )
+    # 发送初始 prompt
+    if proc.stdin:
+        proc.stdin.write(prompt + "\n")
+        proc.stdin.flush()
+    return SessionHandle(session_id=sid, proc=proc, stdin=proc.stdin, stdout=proc.stdout,
+                         meta={"type": "hermes"})
+
+_h.create_session = _hermes_create_session
+
+def _hermes_session_send(handle: SessionHandle, message: str) -> None:
+    if handle.stdin and not handle.stdin.closed:
+        handle.stdin.write(message + "\n")
+        handle.stdin.flush()
+
+_h.session_send = _hermes_session_send
 
 
 _register_builtin(AgentBackend(
