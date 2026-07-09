@@ -429,17 +429,7 @@ def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
                         last_output_time = now
                         # Print live output with prefix
                         if _line_s.strip():
-                            _line_out = _line_s[:200]
-                            # Parse and clean claude-code JSON output
-                            if _agent in ("claude-code", "claude") and _line_s.startswith("{"):
-                                try:
-                                    _j = __import__('json').loads(_line_s)
-                                    _result = _j.get("result") or _j.get("text") or _j.get("message","")
-                                    if _result:
-                                        _line_out = _result[:200]
-                                except (__import__('json').JSONDecodeError, Exception):
-                                    pass
-                            print(f"{prefix}  {_line_out}", flush=True)
+                            print(f"{prefix}  {_line_s[:200]}", flush=True)
 
             if proc.stderr:
                 _r2, _, _ = _sel.select([proc.stderr], [], [], 0)
