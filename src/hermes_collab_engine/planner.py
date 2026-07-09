@@ -40,7 +40,9 @@ class Planner:
         words = re.findall(r"\w+", text)
         steps = min(10, max(1, len(re.findall(r"[,;；，。\n]| and | then |同时|然后|并且", request)) + 1))
         simple_verbs = ["explain", "summarize", "read", "show", "list", "ping", "检查", "查看", "解释", "总结", "列出"]
-        write_verbs = ["implement", "add", "fix", "update", "refactor", "delete", "实现", "增加", "新增", "修复", "更新", "重构", "删除"]
+        write_verbs = ["implement", "add", "fix", "update", "refactor", "delete",
+                        "实现", "增加", "新增", "修复", "更新", "重构", "删除",
+                        "生成", "创建", "开发", "写", "编写", "写一个", "生成一个"]
         broad_words = ["architecture", "framework", "engine", "协同", "架构", "框架"]
         coupling_words = ["集成", "dashboard", "sqlite", "worker", "memory", "面板", "planner", "scheduler"]
         scope_words = ["search", "scope", "find", "survey", "research", "investigate",
@@ -64,6 +66,11 @@ class Planner:
             ambiguity = max(ambiguity, 7)
             coupling = max(coupling, 8)
         overall = max(1, min(10, round((domain + steps + ambiguity + coupling + risk) / 5)))
+        # Write-verb heuristic: if task contains write verbs and has multiple steps,
+        # force at least "single" routing even when overall is low
+        _has_write_verb = any(k in request for k in write_verbs)
+        if _has_write_verb and steps >= 3 and overall <= 3:
+            overall = 4
         if complex_combo:
             overall = max(overall, 7)
         if overall <= 3:
@@ -231,9 +238,15 @@ No prose, no code fences outside the JSON, just the array.
         return nodes
 
     def decompose(self, request: str, max_nodes: int = 8, capabilities: list[str] | None = None,
-                  agent_backend: Any = None) -> Plan:
+                  agent_backend: Any = None,
+                  package: str | None = None,
+                  package_graph_def: str | None = None,
+                  score: ComplexityScore | None = None) -> Plan:
+        _ = package  # accepted for interface compat with dragon-team
+        _ = package_graph_def
         lessons_block = self._load_recent_lessons()
-        score = self._local_assess(request)
+        if score is None:
+            score = self._local_assess(request)
         if score.routing == "single":
             return self.fallback_wbs(request, score=score)
         if score.routing == "direct":
@@ -367,7 +380,8 @@ No prose, no code fences outside the JSON, just the object.
         # 纯搜索/调研类请求：只有分析节点（read-only），不追加实施节点
         _is_search_only = not any(k in snippet.lower() for k in
             ["implement", "add", "fix", "update", "refactor", "delete",
-             "实现", "增加", "新增", "修复", "更新", "重构", "删除"])
+             "实现", "增加", "新增", "修复", "更新", "重构", "删除",
+             "生成", "创建", "开发", "写", "编写"])
         _has_search = any(k in snippet.lower() for k in
             ["search", "scope", "find", "survey", "research", "investigate",
              "搜索", "查找", "调研", "调查", "查阅", "搜寻", "范围", "探索"])

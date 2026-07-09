@@ -3037,14 +3037,9 @@ Output contract:
         session_name = f"dt-leader-{run_id}"
         _lead_cmd = self.leader_agent.command[0] if self.leader_agent else None
         if _lead_cmd is None:
-            # Fall back to worker agent if leader agent is unavailable
-            import shutil as _shutil
-            _cmp = self.agent_backend.command[0]
-            if _shutil.which(_cmp):
-                _lead_cmd = _cmp
-            else:
-                _log.warning("[LeaderSession] No leader or worker agent available, skipping leader session")
-                return False
+            # No leader agent configured — user is the leader (v7.0 mode)
+            _log.info("[LeaderSession] No leader agent configured, skipping leader session (user-as-leader mode)")
+            return False
         cmd = [_lead_cmd, "chat", "-q", "", "--resume", session_name, "--quiet"]
         try:
             proc = subprocess.Popen(
