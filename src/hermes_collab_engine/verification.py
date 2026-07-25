@@ -35,13 +35,12 @@ def verify_v45_capabilities() -> VerificationReport:
     pre-v5.0 ``verify-v45`` command.
     """
     from .server import DashboardServer, INDEX_HTML
-    from .skills import get_default_registry
-    from .tools import get_default_tool_registry
+    from .registry import get_unified_registry, SkillEntry, ToolEntry
 
     checks: list[VerificationCheck] = []
 
-    skill_registry = get_default_registry()
-    skill_names = {skill.name for skill in skill_registry.list_all()}
+    registry = get_unified_registry()
+    skill_names = {skill.name for skill in registry.list_by_type(SkillEntry)}
     expected_skills = {"implementation-focus", "test-verify", "search-verify"}
     missing_skills = sorted(expected_skills - skill_names)
     checks.append(VerificationCheck(
@@ -50,7 +49,7 @@ def verify_v45_capabilities() -> VerificationReport:
         "missing: " + ", ".join(missing_skills) if missing_skills else "core built-in skills are registered",
     ))
 
-    selected_skills = skill_registry.select_for_node("implementation", "implement code and verify with unittest")
+    selected_skills = registry.select_skills("implementation", "implement code and verify with unittest")
     selected_skill_names = {skill.name for skill in selected_skills}
     skill_selection_ok = {"implementation-focus", "test-verify"}.issubset(selected_skill_names)
     checks.append(VerificationCheck(
@@ -59,8 +58,7 @@ def verify_v45_capabilities() -> VerificationReport:
         "selected: " + ", ".join(skill.name for skill in selected_skills),
     ))
 
-    tool_registry = get_default_tool_registry()
-    profile_names = {profile.name for profile in tool_registry.list_all()}
+    profile_names = {profile.name for profile in registry.list_by_type(ToolEntry)}
     expected_profiles = {"file-edit", "git-local", "python-tests", "mcp-readonly"}
     missing_profiles = sorted(expected_profiles - profile_names)
     checks.append(VerificationCheck(
@@ -69,7 +67,7 @@ def verify_v45_capabilities() -> VerificationReport:
         "missing: " + ", ".join(missing_profiles) if missing_profiles else "core built-in tool profiles are registered",
     ))
 
-    selected_profiles = tool_registry.select_for_node("verification", "verify an MCP read-only tool integration with tests")
+    selected_profiles = registry.select_tools("verification", "verify an MCP read-only tool integration with tests")
     selected_profile_names = {profile.name for profile in selected_profiles}
     profile_selection_ok = {"python-tests", "mcp-readonly"}.issubset(selected_profile_names)
     checks.append(VerificationCheck(

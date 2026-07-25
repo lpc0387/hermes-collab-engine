@@ -22,13 +22,14 @@ class Planner:
         self.skill_registry = skill_registry
         self.tool_registry = tool_registry
         self.leader_agent = leader_agent
+        self.agent_backend: Any = None
 
     def assess(self, request: str) -> ComplexityScore:
         local = self._local_assess(request)
         if local.routing == "direct":
             return local
         try:
-            score = self._claude_assess(request)
+            score = self._llm_assess(request)
             if score is not None:
                 return self._prefer_direct_for_simple(request, score)
         except Exception:
@@ -93,10 +94,7 @@ class Planner:
             return local
         return score
 
-    def _heuristic_assess(self, request: str) -> ComplexityScore:
-        return self._local_assess(request)
-
-    def _claude_assess(self, request: str) -> ComplexityScore | None:
+    def _llm_assess(self, request: str) -> ComplexityScore | None:
         prompt = f"""You are scoring the complexity of a software engineering request.
 
 User request:
@@ -107,7 +105,7 @@ domain, steps, ambiguity, coupling, risk, overall
 and a string field routing which must be one of: "direct", "single", "wbs".
 No prose, no code fences outside the JSON, just the array.
 """
-        data = self._claude_json(prompt)
+        data = self._parse_llm_response(prompt)
         if not isinstance(data, list) or not data:
             return None
         item = data[0]
@@ -248,8 +246,9 @@ No prose, no code fences outside the JSON, just the array.
                   package: str | None = None,
                   package_graph_def: str | None = None,
                   score: ComplexityScore | None = None) -> Plan:
-        _ = package  # accepted for interface compat with dragon-team
+        _ = package  # accepted for interface compat
         _ = package_graph_def
+        self.agent_backend = agent_backend
         lessons_block = self._load_recent_lessons()
         if score is None:
             score = self._local_assess(request)
@@ -326,7 +325,7 @@ Design nodes so independent work can run in parallel while write-heavy implement
 No prose, no code fences outside the JSON, just the object.
 """
         try:
-            data = self._claude_json(prompt)
+            data = self._parse_llm_response(prompt)
             if isinstance(data, list):
                 data = {"nodes": data}
             raw_nodes = data.get("nodes", []) if isinstance(data, dict) else []
@@ -492,13 +491,11 @@ No prose, no code fences outside the JSON, just the object.
             node.fingerprint = node.fingerprint or self._node_fingerprint(node)
         return Plan(nodes=nodes, shared_brief=shared_brief)
 
-    def _claude_json(self, prompt: str):
+    def _parse_llm_response(self, prompt: str):
         if self.leader_agent:
             cmd = self.leader_agent.build_command(prompt=prompt, model=self.model)
         else:
-            cmd = ["claude", "-p", prompt, "--output-format", "json"]
-            if self.model:
-                cmd.extend(["--model", self.model])
+            cmd = self.agent_backend.build_command(prompt=prompt, model=self.model)
         proc = subprocess.run(cmd, cwd=self.cwd, text=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=self.timeout)
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr)

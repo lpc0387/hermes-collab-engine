@@ -376,37 +376,26 @@ class TestUnifiedRegistry(unittest.TestCase):
 
 
 class TestLegacyImport(unittest.TestCase):
-    """Test from_legacy bridge."""
+    """Test that builtin entries exist in the unified registry."""
 
-    def test_import_from_legacy_registries(self):
-        from src.hermes_collab_engine.skills import get_default_registry
-        from src.hermes_collab_engine.tools import get_default_tool_registry
-
-        reg = UnifiedRegistry.from_legacy(
-            skill_registry=get_default_registry(),
-            tool_registry=get_default_tool_registry(),
-        )
+    def test_unified_registry_has_builtin_entries(self):
+        reg = get_unified_registry()
         all_entries = reg.list_all()
-        # Should have all 5 builtin skills + 5 builtin tool profiles
-        self.assertEqual(len(all_entries), 10)
+        self.assertGreaterEqual(len(all_entries), 13)
 
         skills = reg.list_by_type(SkillEntry)
-        self.assertEqual(len(skills), 5)
+        self.assertGreaterEqual(len(skills), 7)
 
         tools = reg.list_by_type(ToolEntry)
-        self.assertEqual(len(tools), 5)
+        self.assertGreaterEqual(len(tools), 6)
 
     def test_legacy_skills_have_capabilities(self):
-        from src.hermes_collab_engine.skills import get_default_registry
-
-        reg = UnifiedRegistry.from_legacy(skill_registry=get_default_registry())
+        reg = get_unified_registry()
         impl_skills = reg.select_for_capability("implementation", entry_type=SkillEntry)
         self.assertGreater(len(impl_skills), 0)
 
     def test_legacy_tools_have_capabilities(self):
-        from src.hermes_collab_engine.tools import get_default_tool_registry
-
-        reg = UnifiedRegistry.from_legacy(tool_registry=get_default_tool_registry())
+        reg = get_unified_registry()
         impl_tools = reg.select_for_capability("implementation", entry_type=ToolEntry)
         self.assertGreater(len(impl_tools), 0)
 

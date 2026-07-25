@@ -1,0 +1,10 @@
+run:
+  timeout: 3m
+
+linters:
+  enable:
+    - gofmt
+    - govet
+    - misspell
+    - staticcheck
+    - unused

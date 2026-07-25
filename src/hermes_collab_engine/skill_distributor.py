@@ -8,7 +8,7 @@ backend support, and returns only the relevant skill content + tool
 profiles + MCP server names.
 
 The SKILL_TOOL_MAP and SKILL_MCP_MAP are kept in this standalone file so
-they can be reused outside the dragon-team engine (e.g. by hermes-collab).
+they can be reused outside this project (e.g. by other engines).
 """
 from __future__ import annotations
 
@@ -17,8 +17,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .agents import AgentBackend
-    from .skills import SkillEntry, SkillRegistry
-    from .tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -192,13 +190,17 @@ class SkillDistributor:
 
     def __init__(
         self,
-        skill_registry: Any = None,
-        tool_registry: Any = None,
         unified_registry: Any = None,
     ):
-        self.skill_registry = skill_registry
-        self.tool_registry = tool_registry
         self.unified_registry = unified_registry
+
+    @property
+    def skill_registry(self):
+        return self.unified_registry
+
+    @property
+    def tool_registry(self):
+        return self.unified_registry
 
     def resolve_for_node(
         self,
@@ -338,28 +340,28 @@ class SkillDistributor:
         """
         skills_block = ""
         if skill_names:
-            if self.skill_registry is not None:
+            if self.unified_registry is not None:
                 skills_list = []
                 for name in skill_names:
-                    entry = self.skill_registry.get(name)
+                    entry = self.unified_registry.get(name)
                     if entry is not None:
                         skills_list.append(entry)
                     else:
                         logger.warning("render_for_prompt: skill %r not found in registry, skipping", name)
-                skills_block = self.skill_registry.render_for_prompt(skills_list)
+                skills_block = self.unified_registry.render_skills_for_prompt(skills_list)
             else:
                 logger.warning("skill_registry not set; skills block empty for %s", skill_names)
 
         tools_block = ""
         if tool_names:
-            if self.tool_registry is not None:
+            if self.unified_registry is not None:
                 profiles = []
                 for name in tool_names:
-                    entry = self.tool_registry.get(name)
+                    entry = self.unified_registry.get(name)
                     if entry is not None:
                         profiles.append(entry)
                 if profiles:
-                    tools_block = self.tool_registry.render_for_prompt(profiles)
+                    tools_block = self.unified_registry.render_tools_for_prompt(profiles)
             else:
                 logger.warning("tool_registry not set; tools block empty for %s", tool_names)
 

@@ -48,43 +48,11 @@ class SkillEntry(RegistryEntry):
     file_path: str = ""  # disk path of the skill file
     required_tools: list[str] = field(default_factory=list)  # tool profiles needed (used by SkillDistributor)
 
-    @classmethod
-    def from_legacy(cls, legacy) -> "SkillEntry":
-        """Convert a skills.SkillEntry into a unified SkillEntry."""
-        return cls(
-            name=legacy.name,
-            display_name=legacy.display_name,
-            category=legacy.category,
-            description=legacy.description,
-            capabilities=list(legacy.applicable_node_types),
-            source=legacy.source,
-            priority=legacy.priority,
-            content=legacy.content,
-            file_path=getattr(legacy, "file_path", ""),
-            required_tools=list(getattr(legacy, "required_tools", [])),
-        )
-
-
 @dataclass
 class ToolEntry(RegistryEntry):
     """A tool profile describing allowed tools for workers."""
 
     allowed_tools: list[str] = field(default_factory=list)
-
-    @classmethod
-    def from_legacy(cls, legacy) -> "ToolEntry":
-        """Convert a tools.ToolProfile into a unified ToolEntry."""
-        return cls(
-            name=legacy.name,
-            display_name=legacy.display_name,
-            category=legacy.category,
-            description=legacy.description,
-            capabilities=list(legacy.applicable_node_types),
-            source=legacy.source,
-            priority=legacy.priority,
-            allowed_tools=list(legacy.allowed_tools),
-        )
-
 
 @dataclass
 class MCPEntry(RegistryEntry):
@@ -113,46 +81,6 @@ class MCPEntry(RegistryEntry):
 # Unified registry
 # ---------------------------------------------------------------------------
 
-_PERSIST_KEY = "unified_registry_entries"
-
-# Registry entry class dispatch: type string -> dataclass
-_ENTRY_TYPES: dict[str, type[RegistryEntry]] = {
-    "skill": SkillEntry,
-    "tool": ToolEntry,
-    "mcp": MCPEntry,
-}
-
-
-def _entry_type_key(entry: RegistryEntry) -> str:
-    """Return the type string for an entry (skill / tool / mcp)."""
-    if isinstance(entry, MCPEntry):
-        return "mcp"
-    if isinstance(entry, ToolEntry):
-        return "tool"
-    return "skill"
-
-
-def _serialize_entry(entry: RegistryEntry) -> dict[str, Any]:
-    """Serialize an entry to a JSON-safe dict with a ``_type`` discriminator."""
-    data = entry.to_dict()
-    data["_type"] = _entry_type_key(entry)
-    return data
-
-
-def _deserialize_entry(data: dict[str, Any]) -> RegistryEntry | None:
-    """Reconstruct a RegistryEntry from a serialized dict."""
-    type_key = data.pop("_type", "")
-    cls = _ENTRY_TYPES.get(type_key)
-    if cls is None:
-        return None
-    import dataclasses
-    field_names = {f.name for f in dataclasses.fields(cls)}
-    filtered = {k: v for k, v in data.items() if k in field_names}
-    try:
-        return cls(**filtered)
-    except TypeError:
-        return None
-
 
 class UnifiedRegistry:
     """Capability-indexed registry for skills, tools, and MCP entries.
@@ -161,43 +89,9 @@ class UnifiedRegistry:
     select a bundle by node capability without scanning all entries.
     """
 
-    def __init__(self, store: Any = None) -> None:
+    def __init__(self) -> None:
         self._entries: dict[str, RegistryEntry] = {}
         self._capability_index: dict[str, list[str]] = {}  # cap -> [entry names]
-        self._store = store
-        if store is not None:
-            self._restore_persisted()
-
-    # -- persistence --------------------------------------------------------
-
-    def _restore_persisted(self) -> None:
-        """Load web-persisted entries from the settings table."""
-        if self._store is None:
-            return
-        try:
-            raw = self._store.get_setting(_PERSIST_KEY)
-        except Exception:
-            return
-        if not isinstance(raw, list):
-            return
-        for item in raw:
-            entry = _deserialize_entry(dict(item))
-            if entry is not None:
-                self._index_entry(entry)
-
-    def _persist_entries(self) -> None:
-        """Save all non-hermes entries to the settings table."""
-        if self._store is None:
-            return
-        web_entries = [
-            _serialize_entry(e)
-            for e in self._entries.values()
-            if e.source != "hermes"
-        ]
-        try:
-            self._store.set_setting(_PERSIST_KEY, web_entries)
-        except Exception:
-            pass
 
     def _index_entry(self, entry: RegistryEntry) -> None:
         """Add an entry to the in-memory index (no persistence)."""
@@ -219,9 +113,6 @@ class UnifiedRegistry:
             bucket = self._capability_index.setdefault(normalized, [])
             if entry.name not in bucket:
                 bucket.append(entry.name)
-        # Persist web-added entries
-        if entry.source != "hermes":
-            self._persist_entries()
 
     def get(self, name: str) -> RegistryEntry | None:
         return self._entries.get(name)
@@ -235,8 +126,6 @@ class UnifiedRegistry:
             bucket = self._capability_index.get(cap.strip().lower())
             if bucket and name in bucket:
                 bucket.remove(name)
-        # Persist after deletion
-        self._persist_entries()
         return True
 
     def list_all(self) -> list[RegistryEntry]:
@@ -468,20 +357,7 @@ class UnifiedRegistry:
             score += 1
         return score
 
-    # -- import from legacy registries --------------------------------------
-
-    @classmethod
-    def from_legacy(cls, skill_registry=None, tool_registry=None, store=None) -> "UnifiedRegistry":
-        """Build a UnifiedRegistry from existing SkillRegistry and ToolRegistry."""
-        reg = cls(store=store)
-        if skill_registry is not None:
-            for skill in skill_registry.list_all():
-                reg.register(SkillEntry.from_legacy(skill))
-        if tool_registry is not None:
-            for profile in tool_registry.list_all():
-                reg.register(ToolEntry.from_legacy(profile))
-        return reg
-
+    # -- scoring helper -----------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # MCP discovery
@@ -548,21 +424,121 @@ def discover_mcp_entries(config_path: str | None = None) -> list[MCPEntry]:
 _DEFAULT_REGISTRY: UnifiedRegistry | None = None
 
 
-def get_unified_registry(store: Any = None) -> UnifiedRegistry:
-    """Return the default unified registry, building it lazily.
-
-    If *store* is provided (first call), it is used for persistence.
-    Subsequent calls return the cached instance regardless of *store*.
-    """
+def get_unified_registry() -> UnifiedRegistry:
+    """Return the default unified registry, building it lazily."""
     global _DEFAULT_REGISTRY
     if _DEFAULT_REGISTRY is None:
-        from .skills import get_default_registry
-        from .tools import get_default_tool_registry
-        _DEFAULT_REGISTRY = UnifiedRegistry.from_legacy(
-            skill_registry=get_default_registry(),
-            tool_registry=get_default_tool_registry(),
-            store=store,
-        )
+        _DEFAULT_REGISTRY = UnifiedRegistry()
+        # Register built-in skills
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="ui-design-v2", display_name="UI Design v2 — shadcn/ui", category="design",
+            description="Advanced UI design skill using shadcn/ui v4 components with Linear/Stripe/Vercel aesthetic.",
+            content="(content truncated for display)",
+            capabilities=["implementation", "design", "design-v2", "frontend", "ui", "coding"],
+            priority=1, source="hermes", required_tools=["file-edit", "mcp-readonly"],
+        ))
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="implementation-focus", display_name="Focused Implementation", category="coding",
+            description="Keep implementation shards concrete, minimal, and file-level.",
+            content=(
+                "- Make the smallest useful code change that satisfies this node.\n"
+                "- Match surrounding naming, comments, and style.\n"
+                "- Report exact files modified and avoid claiming unrun verification."
+            ),
+            capabilities=["implementation", "coding", "docs", "general"],
+            priority=1, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="test-verify", display_name="Test & Verification", category="verification",
+            description="Run targeted checks and report failures honestly.",
+            content=(
+                "- Prefer the narrowest regression test that proves this node.\n"
+                "- If a command fails, include the failure reason in verification.\n"
+                "- Do not mark partial work as complete when tests are failing."
+            ),
+            capabilities=["implementation", "verification", "debugging"],
+            priority=1, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="search-verify", display_name="Multi-Source Search & Verification", category="research",
+            description="Multi-source search verification.",
+            content=("- Search multiple sources in parallel.\n- Cross-validate findings.\n- Produce a verification report with confidence levels."),
+            capabilities=["analysis", "research", "planning", "scope", "evidence"],
+            priority=1, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="debug-root-cause", display_name="Debug Root Cause", category="debugging",
+            description="Trace failures to a concrete cause before fixing.",
+            content=("- Reproduce or inspect the failing path before changing code.\n- Fix the cause rather than adding broad fallback behavior.\n- Add or update a regression check when practical."),
+            capabilities=["debugging", "implementation"],
+            priority=2, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="risk-checkpoint", display_name="Risk Checkpoint", category="planning",
+            description="Call out high-risk or irreversible actions before proceeding.",
+            content=("- Avoid destructive or credential-affecting actions unless explicitly authorized.\n- Surface blockers and risky assumptions."),
+            capabilities=["implementation", "planning", "verification"],
+            priority=3, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="browser-automation", display_name="Browser Automation", category="automation",
+            description="Control a headless Chrome browser via GuidedRunner.",
+            content="You have a headless Chrome browser available. Use the GuidedRunner for browser automation.",
+            capabilities=["implementation", "verification", "debugging"],
+            priority=1, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="frontend-optimization", display_name="Frontend Optimization & UI Design", category="design",
+            description="Build accessible, performant frontends with Tailwind CSS and modern UX patterns.",
+            content="(content truncated for display)",
+            capabilities=["implementation", "verification", "design", "frontend", "ui"],
+            priority=2, source="hermes",
+        ))
+
+        # Register built-in tool profiles
+        _DEFAULT_REGISTRY.register(ToolEntry(
+            name="file-edit", display_name="File Read/Edit", category="filesystem",
+            description="Read and edit repository files for implementation work.",
+            allowed_tools=["Read", "Edit", "Write", "MultiEdit"],
+            capabilities=["implementation", "coding", "debugging", "verification", "analysis", "research", "planning", "docs"],
+            priority=1, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(ToolEntry(
+            name="git-local", display_name="Local Git Inspection", category="git",
+            description="Inspect local repository state without network effects.",
+            allowed_tools=["Bash(git diff*)", "Bash(git status*)", "Bash(git ls-files*)"],
+            capabilities=["*"],
+            priority=1, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(ToolEntry(
+            name="python-tests", display_name="Python Test Runner", category="verification",
+            description="Run local Python unit tests and syntax checks.",
+            allowed_tools=["Bash(python3 -m unittest*)", "Bash(python3 -m py_compile*)", "Bash(bash -n*)"],
+            capabilities=["implementation", "verification", "debugging"],
+            priority=1, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(ToolEntry(
+            name="git-write", display_name="Git Write Operations", category="git",
+            description="Clone, stage, commit, or push only when explicitly requested.",
+            allowed_tools=["Bash(git clone*)", "Bash(git add*)", "Bash(git commit*)", "Bash(git push*)"],
+            capabilities=["implementation"],
+            priority=3, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(ToolEntry(
+            name="mcp-readonly", display_name="Read-only MCP Tools", category="mcp",
+            description="Allow read-only MCP filesystem/search tools.",
+            allowed_tools=["mcp__filesystem__read_file", "mcp__filesystem__list_directory", "mcp__search__query"],
+            capabilities=["analysis", "research", "planning", "verification"],
+            priority=2, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(ToolEntry(
+            name="browser-automation", display_name="Browser Automation", category="automation",
+            description="Control a headless Chrome browser via intent DSL.",
+            allowed_tools=["Bash(python3 -c *GuidedRunner*)"],
+            capabilities=["implementation", "verification", "debugging"],
+            priority=2, source="hermes",
+        ))
+
         # Merge MCP entries from config
         for mcp_entry in discover_mcp_entries():
             _DEFAULT_REGISTRY.register(mcp_entry)

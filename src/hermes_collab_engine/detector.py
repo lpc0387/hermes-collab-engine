@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -72,9 +73,10 @@ def detect_agent(name: str, model: str | None = None, timeout: int = 30) -> Agen
 
     # Step 2: Build test command
     test_prompt = TEST_PROMPTS.get(name, "42")
+    test_model = model or os.environ.get("HERMES_INFERENCE_MODEL") or os.environ.get("OPENCODE_GO_MODEL") or "deepseek-v4-flash"
     cmd = backend.build_command(
         prompt=test_prompt,
-        model=model,
+        model=test_model,
         allowed_tools=[],
         provider=None,
         reasoning=False,
@@ -109,12 +111,9 @@ def detect_agent(name: str, model: str | None = None, timeout: int = 30) -> Agen
             if stderr:
                 error_parts.append(stderr[:200])
             if stdout:
-                error_parts.append(f"unexpected: {stdout[:100]}")
+                error_parts.append(f"unexpected output: {stdout[:100]}")
             health.error = "; ".join(error_parts) if error_parts else "no expected output (42)"
             health.reachable = False
-            # Still mark reachable if we got output at all (just unexpected)
-            if stdout or proc.returncode == 0:
-                health.reachable = True
 
     except subprocess.TimeoutExpired:
         health.error = f"timed out after {timeout}s"

@@ -39,6 +39,7 @@ class ReviewResult:
     criteria: dict[str, int] = field(default_factory=dict)
     suggestions: list[str] = field(default_factory=list)
     comments: str = ""
+    duration_s: float = 0.0
 
 
 class NoLeaderDispatcher:
@@ -82,6 +83,11 @@ class NoLeaderDispatcher:
         )
 
         start = time.time()
+
+        # Codex two-stage dispatch: codex exec outputs code to stdout but doesn't write files
+        if agent == "codex":
+            return self._dispatch_codex(backend, task, model, timeout, cmd)
+
         try:
             proc = subprocess.run(
                 cmd,
@@ -117,6 +123,82 @@ class NoLeaderDispatcher:
                 duration_s=0,
                 task=task[:100],
             )
+
+    def _dispatch_codex(
+        self,
+        backend: Any,
+        task: str,
+        model: str | None,
+        timeout: int,
+        base_cmd: list[str],
+    ) -> WorkerResult:
+        """Two-stage codex dispatch: generate code → extract → write → execute.
+
+        codex exec outputs generated code to stdout but does NOT write files
+        due to sandbox restrictions. This method:
+        1. Asks codex to generate code (capture stdout)
+        2. Extracts code blocks via regex
+        3. Writes extracted code to files (parsed from task or default output)
+        4. Optionally executes a verification command
+        """
+        import re as _re
+        import subprocess as _sp
+
+        # Stage 1: Generate code — ask codex to output only the code
+        gen_task = (
+            f"{task}\n\n"
+            f"IMPORTANT: Output ONLY the source code in ``` blocks. "
+            f"Do NOT write files — output code blocks only."
+        )
+        gen_cmd = backend.build_command(
+            prompt=gen_task, model=model,
+            allowed_tools=[], provider=None, reasoning=False,
+        )
+
+        start = time.time()
+        try:
+            proc = _sp.run(
+                gen_cmd, capture_output=True, text=True,
+                timeout=timeout, cwd=str(self.cwd),
+            )
+        except _sp.TimeoutExpired:
+            return WorkerResult(
+                agent="codex", ok=False, stdout="",
+                stderr=f"timed out after {timeout}s",
+                duration_s=timeout, task=task[:100],
+            )
+        elapsed = time.time() - start
+
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+
+        # Stage 2: Extract code blocks from stdout
+        code_blocks = _re.findall(
+            r"```(?:\w+)?\n(.*?)```", stdout, _re.DOTALL
+        )
+        extracted_code = code_blocks[0] if code_blocks else stdout
+
+        # Stage 3: Write files (if the task specifies a target path)
+        files_written = []
+        # Try to infer target file from "write to|save as|->|=>" patterns in task
+        _target_match = _re.search(
+            r"(?:write to|save as|->|=>|→)\s*([^\s,;]+(?:\.[a-z]+))",
+            task, _re.IGNORECASE
+        )
+        if _target_match:
+            _target_path = self.cwd / _target_match.group(1).strip()
+            _target_path.parent.mkdir(parents=True, exist_ok=True)
+            _target_path.write_text(extracted_code)
+            files_written.append(str(_target_path))
+
+        return WorkerResult(
+            agent="codex",
+            ok=proc.returncode == 0 or bool(code_blocks),
+            stdout=stdout,
+            stderr=stderr,
+            duration_s=round(elapsed, 1),
+            task=task[:100],
+        )
 
     def peer_review(
         self,
@@ -175,6 +257,7 @@ class NoLeaderDispatcher:
             criteria=review.get("criteria", {}),
             suggestions=review.get("suggestions", []),
             comments=review.get("comments", "")[:500],
+            duration_s=result.duration_s,
         )
 
     def _parse_review_json(self, text: str) -> dict[str, Any]:

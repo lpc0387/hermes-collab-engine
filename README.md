@@ -1,8 +1,8 @@
-# Hermes Collab Engine v5.6
+# Hermes Collab Engine v7.5
 
-**多智能体协同引擎** — Leader 拆解 WBS → Worker 并行执行 → 结果聚合。
+**多智能体协同引擎** — Leader 拆解 WBS → Worker 并行执行 → LLM 审查聚合。
 
-[![English](https://img.shields.io/badge/English-README.en.md-blue)](README.en.md) [![Release v5.6.1](https://img.shields.io/badge/release-v5.6.1-blue)](CHANGELOG.md) [![Sandbox ready](https://img.shields.io/badge/sandbox-ready-success)](sandbox/README.md) [![License MIT](https://img.shields.io/badge/license-MIT-green)](#许可证) [![Security](https://img.shields.io/badge/security-policy-orange)](SECURITY.md)
+[![English](https://img.shields.io/badge/English-README.en.md-blue)](README.en.md) [![Release v7.5.0](https://img.shields.io/badge/release-v7.5.0-blue)](CHANGELOG.md) [![Sandbox ready](https://img.shields.io/badge/sandbox-ready-success)](sandbox/README.md) [![License MIT](https://img.shields.io/badge/license-MIT-green)](#许可证) [![Security](https://img.shields.io/badge/security-policy-orange)](SECURITY.md)
 
 多智能体编排引擎，支持 WBS 协同、并行 Worker、Skill/MCP 分发、Lessons 自学习。
 
@@ -44,11 +44,16 @@ hermes-collab server --host 0.0.0.0 --port 8765 --cwd .
 |---|---|
 | WBS 协同 | Leader 评分、拆解、分发节点，Worker 按依赖并行执行 |
 | 双模型 | Leader / Worker 可选用不同模型 |
+| **Leader 审查报告** | 节点执行完成后，LLM 逐项对照任务要求审查产出，生成结构化审查报告持久化到 DB，📓 按钮查看 |
+| **多 Agent 支持** | opencode / claude-code / codex / hermes 四种 Worker 全链路支持，各带 session 持久化能力 |
+| **Codex 两段式 dispatch** | codex exec 不写文件限制的解决方案：先生成代码→提取→写入→执行，三段式流水线 |
 | SkillDistributor | 集中分发引擎，节点能力自动匹配 skill + MCP 工具 |
 | MCP 工具集成 | 搜索 / 浏览器 / UI 组件等 6 个服务器 |
 | 协议代理 | Go/Python 内置代理，自动翻译 Anthropic ↔ OpenAI |
 | Lessons 自学习 | 引擎自动记录经验并去重提炼 |
 | 运行中干预 | kill/split/skip/redo 节点 |
+| **Agent 健康检测** | 自动检测可用 Agent，不可用时自动 fallback 到 opencode |
+| **线程安全加固** | agent_backend 局部分配、SSE 连接加锁、_worker_sessions 遍历加锁 |
 | 会话链 | 接入上次会话形成连续链 |
 | 隔离沙盒 | 一键启动，独立 DB/workspace，TTL 自动清理 |
 | Level 4 Jail | Worker 子进程 mount/PID/user 隔离 |
@@ -78,6 +83,7 @@ v3 engine refactoring focuses on stability, observability, and session continuit
 | **Node State Tracking** | Granular task node state machine (pending/running/done/failed/skipped) | `engine/node_state.py` |
 | **Session Chain** | Cross-session linking for continuous conversational context | `engine/session_chain.py` |
 | **Context Truncation** | Intelligent context window management to avoid token overflow | `engine/context_truncation.py` |
+| **AgentSession** | Persistent session interface for agent backends (create_session / session_send / close_session); implemented by opencode and hermes agents for multi-turn context retention | `engine/agents.py` |
 
 > **Benefits:** Resumable tasks, transparent execution status, continuous multi-turn context, and reduced token waste.
 

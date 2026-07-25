@@ -126,6 +126,7 @@ class Plan:
     shared_brief: str = ""
     risk_policy: dict[str, Any] = field(default_factory=dict)
     task_type: str = "development"
+    task_requirements: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Plan":
@@ -134,6 +135,8 @@ class Plan:
             nodes=nodes,
             shared_brief=data.get("shared_brief", ""),
             risk_policy=data.get("risk_policy", {}),
+            task_type=data.get("task_type", "development"),
+            task_requirements=data.get("task_requirements", []),
         )
 
     def to_dict(self) -> dict[str, Any]:

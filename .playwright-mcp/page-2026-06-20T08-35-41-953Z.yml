@@ -1,0 +1,74 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - navigation "主导航" [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e6]: 
+        - generic [ref=e7]:
+          - heading "Dragon" [level=1] [ref=e8]
+          - generic [ref=e9]: AI 协同引擎
+      - navigation [ref=e10]:
+        - button " 对话" [ref=e11] [cursor=pointer]:
+          - generic [ref=e12]: 
+          - generic [ref=e13]: 对话
+        - button " 技能市场" [ref=e14] [cursor=pointer]:
+          - generic [ref=e15]: 
+          - generic [ref=e16]: 技能市场
+      - generic [ref=e17]:
+        - generic [ref=e18]:
+          - generic "后端正常 · 引擎在线" [ref=e19]
+          - generic [ref=e20]: 后端正常 · 引擎在线
+        - button "切换到暗色模式" [ref=e21] [cursor=pointer]:
+          - generic [ref=e22]: 
+          - generic [ref=e23]: 暗色模式
+    - complementary "会话记录":
+      - generic [ref=e24]:
+        - heading " 会话记录" [level=3] [ref=e25]:
+          - generic [ref=e26]: 
+          - text: 会话记录
+        - button "关闭会话记录" [ref=e27] [cursor=pointer]:
+          - generic [ref=e28]: 
+      - generic [ref=e29]:
+        - generic [ref=e30]: 
+        - paragraph: 暂无会话记录
+    - main [ref=e31]:
+      - generic [ref=e32]:
+        - generic [ref=e33]:
+          - generic [ref=e34]:
+            - heading " 对话" [level=2] [ref=e35]:
+              - generic [ref=e36]: 
+              - text: 对话
+            - paragraph [ref=e38]: Leader 调度 Worker 协同完成任务
+          - generic [ref=e39]:
+            - button "新会话" [ref=e40] [cursor=pointer]:
+              - generic [ref=e41]: +
+            - button "会话记录" [ref=e42] [cursor=pointer]:
+              - generic [ref=e43]: 
+            - generic [ref=e44]: 就绪
+        - generic [ref=e47]:
+          - generic [ref=e49]: 
+          - heading "开始一次对话" [level=3] [ref=e50]
+          - paragraph [ref=e51]: 输入一句话，Leader 会自动选择 Package，触发对应的 Skill 集合，分配 Worker 完成任务。
+          - generic [ref=e52]:
+            - button " 个人品牌定位" [ref=e53] [cursor=pointer]:
+              - generic [ref=e54]: 
+              - text: 个人品牌定位
+            - button " 客户咨询" [ref=e55] [cursor=pointer]:
+              - generic [ref=e56]: 
+              - text: 客户咨询
+            - button " 直接问答" [ref=e57] [cursor=pointer]:
+              - generic [ref=e58]: 
+              - text: 直接问答
+            - button " 自由创作" [ref=e59] [cursor=pointer]:
+              - generic [ref=e60]: 
+              - text: 自由创作
+        - generic [ref=e61]:
+          - generic [ref=e62]:
+            - textbox "消息输入框" [ref=e63]:
+              - /placeholder: 输入你的需求，Ctrl+Enter 发送，Enter 换行
+            - button "发送消息" [disabled] [ref=e64]:
+              - generic [ref=e65]: 
+          - generic [ref=e66]:
+            - generic [ref=e67]: Ctrl+Enter 发送 · Esc 关闭面板
+            - generic [ref=e68]: 数据仅存储本地
+      - text:  
+  - text: 

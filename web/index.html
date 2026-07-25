@@ -745,25 +745,7 @@ tr.run-row:hover{background:var(--bg-2)}
   .diary-cover{padding:14px 14px 10px}
   .diary-content{font-size:14px;line-height:26px}
 }
-
-/* --- interrupt modal --- */
-.interrupt-modal{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:9999}
-.interrupt-modal .modal-box{background:var(--bg-1);border:2px solid var(--gold);padding:20px;max-width:380px;width:90%;font-family:'VT323',monospace;font-size:14px;color:var(--ink);box-shadow:4px 4px 0 var(--bg-0)}
-.interrupt-modal .modal-box h3{font-family:'Press Start 2P',monospace;font-size:11px;color:var(--gold);margin:0 0 12px}
-.interrupt-modal .modal-btns{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
-.interrupt-modal .modal-btns button{flex:1;min-width:80px;padding:6px 8px;border:2px solid var(--line);background:var(--bg-1);color:var(--ink);font-family:'VT323',monospace;font-size:13px;cursor:pointer;box-shadow:2px 2px 0 var(--bg-0)}
-.interrupt-modal .modal-btns button:hover{border-color:var(--gold);color:var(--gold)}
-.interrupt-modal .modal-btns .btn-danger{border-color:var(--rose);color:var(--rose)}
-.interrupt-modal .modal-btns .btn-danger:hover{background:var(--rose);color:var(--bg-0)}
-
-/* --- task queue in submit bar --- */
-.task-queue{margin-top:8px;font-family:'VT323',monospace;font-size:13px}
-.task-queue .q-item{display:flex;align-items:center;gap:6px;padding:4px 6px;border:1px dashed var(--line);margin-bottom:2px}
-.task-queue .q-num{color:var(--gold);font-family:'Press Start 2P',monospace;font-size:9px;min-width:18px}
-.task-queue .q-text{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-2)}
-.task-queue .q-del{background:none;border:1px solid var(--line);color:var(--ink-3);cursor:pointer;font-size:11px;padding:0 4px;font-family:'VT323',monospace}
-.task-queue .q-del:hover{border-color:var(--rose);color:var(--rose)}
-.action-card.resume.active{border-color:var(--leaf);background:var(--leaf);color:var(--bg-0)}
+}
 
 /* --- skill/MCP management --- */
 .mgmt-section{margin-top:14px;border-top:2px dashed var(--line);padding-top:10px}
@@ -813,32 +795,10 @@ tr.run-row:hover{background:var(--bg-2)}
 </header>
 
 <section class="submit-bar pix" aria-label="任务提交">
-  <div class="submit-field" style="display:none">
-    <div class="submit-models" aria-label="模型选择">
-      <label class="model-label">Leader 模型</label>
-      <input class="model-input" id="leaderModel" value="opencode-go/deepseek-v4-flash" readonly>
-      <label class="model-label">Worker 模型</label>
-      <input class="model-input" id="workerModel" value="opencode-go/deepseek-v4-flash" readonly>
-    </div>
-<div class="pane-readonly" style="padding:12px;background:var(--bg-1);border-radius:6px;margin-bottom:12px;text-align:center;border:1px solid var(--gold);color:var(--ink-2);font-size:13px">
+  <div class="pane-readonly" style="padding:12px;background:var(--bg-1);border-radius:6px;margin-bottom:12px;text-align:center;border:1px solid var(--gold);color:var(--ink-2);font-size:13px">
 ⚡ 只读监控面板 — 任务提交请使用 CLI 命令: <code style="color:var(--gold)">./hermes-collab</code>
 </div>
-  <form class="run-submit" id="runForm" style="display:none">
-    <div class="submit-field">
-      <textarea id="runRequest" rows="3" placeholder="输入任务描述，Ctrl+Enter 提交…" aria-label="任务描述"></textarea>
-      <div class="submit-models" aria-label="模型选择">
-        <label>Leader 模型<input id="leaderModel" name="leader_model" autocomplete="off" placeholder="加载中…" readonly aria-readonly="true"></label>
-        <label>Worker 模型<input id="workerModel" name="worker_model" autocomplete="off" placeholder="加载中…" readonly aria-readonly="true"></label>
-      </div>
-      <div class="submit-hint">Ctrl+Enter 快速提交</div>
-      <div class="submit-actions">
-        <button class="action-card resume" id="resumeBtn" type="button">↩ 接入上次会话</button>
-        <button class="action-card submit" id="runBtn" type="submit" disabled>► 提交协同任务</button>
-      </div>
-      <div class="run-toast" id="runToast" role="status" aria-live="polite"></div>
-      <div class="task-queue" id="taskQueue" style="display:none"></div>
-    </div>
-  </form>
+  <div class="run-toast" id="runToast" role="status" aria-live="polite"></div>
 </section>
 
 <main class="shell">
@@ -1004,21 +964,8 @@ tr.run-row:hover{background:var(--bg-2)}
       <div class="diary-foot">由 Leader Worker 在任务收尾阶段写入 · ESC 或点击空白处关闭</div>
     </div>
   </div>
-</div>
 
-<div class="interrupt-modal" id="interruptModal" style="display:none">
-  <div class="modal-box">
-    <h3>已有任务运行中</h3>
-    <p>当前有协同任务正在运行。请选择：</p>
-    <div class="modal-btns">
-      <button id="intrQueue">排队等待</button>
-      <button id="intrInterrupt" class="btn-danger">中断当前并提交</button>
-      <button id="intrCancel">取消</button>
-    </div>
-  </div>
-</div>
-
-<div class="modal-overlay" id="skillModal" style="display:none">
+  <div class="modal-overlay" id="skillModal" style="display:none">
   <div class="modal-box">
     <h3>添加技能</h3>
     <label>名称<input id="skillName" placeholder="my-skill"></label>
@@ -1101,9 +1048,18 @@ const state={
   lastRunDetailSig:'',
   resumeContext:null,
   resumeEnabled:false,
-  pendingAuth:null,
-  taskQueue:[]
 };
+
+/* ---------- toast notification ---------- */
+function showRunToast(kind,msg){
+  const toast=$('runToast');
+  if(!toast)return;
+  toast.textContent=msg;
+  toast.className='run-toast '+(kind==='ok'?'ok':'bad');
+  toast.style.display='block';
+  toast.style.opacity='1';
+  setTimeout(()=>{toast.style.opacity='0';setTimeout(()=>{toast.style.display='none'},300)},3000);
+}
 
 /* ---------- palette + sprite tables ---------- */
 const palettes=[
@@ -1591,8 +1547,7 @@ async function refresh(options={}){
     state.fullRefreshPending=false;
     return refresh({full:true});
   }
-  /* auto-process queue when no run is active */
-  if(!runBusy&&state.taskQueue.length&&!state.runs.find(r=>r.status==='running'))processQueue();
+  // Auto-poll: check for new/updated runs every 15s
   /* refresh session chains */
   renderSessionChains();
 }
@@ -1921,113 +1876,7 @@ function tickClock(){
 }
 setInterval(tickClock,1000);tickClock();
 
-/* ---------- interrupt modal ---------- */
-let _intrResolve=null;
-function showInterruptModal(){
-  $('interruptModal').style.display='flex';
-  return new Promise(resolve=>{_intrResolve=resolve});
-}
-function closeInterruptModal(choice){
-  $('interruptModal').style.display='none';
-  if(_intrResolve){_intrResolve(choice);_intrResolve=null}
-}
-$('intrQueue').addEventListener('click',()=>closeInterruptModal('queue'));
-$('intrInterrupt').addEventListener('click',()=>closeInterruptModal('interrupt'));
-$('intrCancel').addEventListener('click',()=>closeInterruptModal('cancel'));
-
-/* ---------- task queue ---------- */
-function renderTaskQueue(){
-  const el=$('taskQueue');
-  if(!state.taskQueue.length){el.style.display='none';el.innerHTML='';return}
-  el.style.display='block';
-  el.innerHTML=state.taskQueue.map((q,i)=>`<div class="q-item"><span class="q-num">#${i+1}</span><span class="q-text">${esc(q.request.slice(0,80))}${q.request.length>80?'…':''}</span><button class="q-del" data-qi="${i}" title="移除">✕</button></div>`).join('');
-  el.querySelectorAll('.q-del').forEach(b=>b.addEventListener('click',()=>{state.taskQueue.splice(Number(b.dataset.qi),1);renderTaskQueue()}));
-}
-async function processQueue(){
-  if(runBusy||!state.taskQueue.length)return;
-  const item=state.taskQueue.shift();renderTaskQueue();
-  await doSubmitRun(item.request,item);
-}
-
-/* ---------- resume session ---------- */
-function confirmDefaultAllow(message,seconds=5){
-  const overlay=$('interruptModal');
-  // reuse interrupt modal for confirm
-  return new Promise(resolve=>{
-    const orig=overlay.innerHTML;
-    overlay.style.display='flex';
-    overlay.querySelector('.modal-box').innerHTML=`<h3>确认接入</h3><p>${esc(message)}</p><div class="modal-btns"><button id="_cfOk">确认</button><button id="_cfNo">取消</button></div>`;
-    overlay.querySelector('#_cfOk').onclick=()=>{overlay.style.display='none';overlay.innerHTML=orig;resolve(true)};
-    overlay.querySelector('#_cfNo').onclick=()=>{overlay.style.display='none';overlay.innerHTML=orig;resolve(false)};
-  });
-}
-async function enableResume(){
-  const btn=$('resumeBtn');btn.disabled=true;
-  try{
-    const resp=await fetch('/api/resume-context');
-    if(resp.status===404){showRunToast('bad','暂无历史会话');return}
-    if(!resp.ok)throw new Error(`HTTP ${resp.status}`);
-    const ctx=await resp.json();
-    if(ctx.error){showRunToast('bad','暂无历史会话');return}
-    const ok=await confirmDefaultAllow(`接入 ${ctx.run.title||ctx.run.id} 的摘要与最近交互（约 ${ctx.estimated_tokens} tokens）`);
-    if(!ok){showRunToast('bad','已取消接入上次会话');return}
-    state.resumeContext=ctx;state.resumeEnabled=true;btn.classList.add('active');
-    btn.textContent='✓ 已接入上次会话';showRunToast('ok',`已接入：${ctx.run.id}`);
-    const ta=$('runRequest');if(ta&&!ta.value.trim()){const req=ctx.run.request||'';ta.value=req.length>200?req.slice(0,200)+'…':req}
-  }catch(err){showRunToast('bad','✗ 无法接入：'+(err.message||'无历史会话'))}
-  finally{btn.disabled=false}
-}
-function clearResumeState(){state.resumeContext=null;state.resumeEnabled=false;const btn=$('resumeBtn');btn.classList.remove('active');btn.textContent='↩ 接入上次会话'}
-$('resumeBtn').addEventListener('click',enableResume);
-
-/* mutual-disable: hover one disables the other */
-const _resumeBtn=$('resumeBtn'),_runBtn=$('runBtn');
-_resumeBtn.addEventListener('mouseenter',()=>{if(!_resumeBtn.disabled)_runBtn.disabled=true});
-_resumeBtn.addEventListener('mouseleave',()=>{syncRunInput()});
-_runBtn.addEventListener('mouseenter',()=>{if(!_runBtn.disabled)_resumeBtn.disabled=true});
-_runBtn.addEventListener('mouseleave',()=>{if(!state.resumeEnabled)_resumeBtn.disabled=false});
-
-/* ---------- submit run (with queue support) ---------- */
-let runBusy=false,runToastTimer=null;
-function showRunToast(kind,msg){const el=$('runToast');clearTimeout(runToastTimer);el.classList.remove('ok','bad');if(kind)el.classList.add(kind);el.textContent=msg||'';if(msg)runToastTimer=setTimeout(()=>{el.classList.remove('ok','bad');el.textContent=''},3000)}
-function syncRunInput(){const ta=$('runRequest'),btn=$('runBtn'),cs=getComputedStyle(ta);ta.style.height='auto';const max=(parseFloat(cs.lineHeight)||24)*8+parseFloat(cs.paddingTop)+parseFloat(cs.paddingBottom);ta.style.height=Math.min(ta.scrollHeight,max)+'px';btn.disabled=runBusy||!ta.value.trim()}
-async function submitRun(e){
-  e.preventDefault();
-  const ta=$('runRequest'),btn=$('runBtn'),request=ta.value.trim();
-  if(!request){showRunToast('bad','请输入任务描述');syncRunInput();ta.focus();return}
-  const resumePayload=state.resumeEnabled&&state.resumeContext?{resume:true,resume_run_id:state.resumeContext.run.id}:{};
-  try{
-    const overview=await getJSON('/api/overview');
-    if(overview.running>0){
-      const choice=await showInterruptModal();
-      if(choice==='cancel')return;
-      if(choice==='queue'){
-        if(state.taskQueue.length>=5){showRunToast('bad','队列已满（最多 5 个）');return}
-        state.taskQueue.push({request,...resumePayload});renderTaskQueue();
-        ta.value='';clearResumeState();showRunToast('ok',`已加入队列 #${state.taskQueue.length}`);return
-      }
-      if(choice==='interrupt'){
-        const runs=await getJSON('/api/runs');
-        const running=runs.find(r=>r.status==='running');
-        if(running){await fetch(`/api/runs/${running.id}/interrupt`,{method:'POST'})}
-      }
-    }
-  }catch(e){}
-  await doSubmitRun(request,resumePayload);
-  ta.value='';clearResumeState();
-}
-async function doSubmitRun(request,extra={}){
-  runBusy=true;syncRunInput();$('runBtn').disabled=true;
-  try{
-    await postJSON('/api/runs',{request,...extra});
-    showRunToast('ok','✓ 任务已提交');refresh({full:true});
-  }catch(err){showRunToast('bad','✗ '+err.message)}
-  finally{runBusy=false;syncRunInput()}
-}
-$('runForm').addEventListener('submit',submitRun);
-
-/* ---------- task set tracking ---------- */
-/* ---------- session chains (conversation management) ---------- */
+/* ---------- diary / leader summary ---------- */
 async function renderSessionChains(){
   const panel=$('sessionChainPanel'),body=$('sessionChainBody'),sum=$('sessionChainSummary');
   if(!panel||!body)return;
@@ -2192,9 +2041,6 @@ document.addEventListener('keydown',e=>{
 });
 
 /* ---------- wire up ---------- */
-$('runRequest').addEventListener('input',syncRunInput);
-$('runRequest').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')$('runForm').requestSubmit()});
-syncRunInput();
 $('previewBtn').addEventListener('click',previewCapabilities);
 $('closeDetailBtn').addEventListener('click',closeOverlay);
 $('detailOverlay').addEventListener('click',e=>{if(e.target.id==='detailOverlay')closeOverlay()});
@@ -2207,20 +2053,25 @@ loadConfig();refresh();previewCapabilities();loadRegistryLists();loadAgentList()
 requestAnimationFrame(render);
 requestAnimationFrame(processHover);
 
-/* ---------- SSE with reconnect ---------- */
+/* ---------- SSE with reconnect (exponential backoff) ---------- */
+let sseRetryDelay=1000;
 function connectSSE(){
   try{
     const evt=new EventSource('/api/events');
-    evt.onopen=()=>setLive('ok','在线');
+    evt.onopen=()=>{setLive('ok','在线');sseRetryDelay=1000};
     evt.onmessage=e=>{
-      try{const d=JSON.parse(e.data);if(d.overview)setMetrics(d.overview);if(d.type||d.run_id)refresh({full:true})}catch(err){}
+      try{const d=JSON.parse(e.data);if(d.overview)setMetrics(d.overview);if(d.type||d.run_id)refresh({full:true})}catch(err){console.warn('SSE parse:',err)}
     };
     evt.onerror=()=>{
       setLive('warn','重连中…');
       evt.close();
-      setTimeout(connectSSE,3000);
+      setTimeout(connectSSE,Math.min(sseRetryDelay,30000));
+      sseRetryDelay=Math.min(sseRetryDelay*1.5,30000);
     };
-  }catch(e){setLive('bad','SSE 不可用')}
+  }catch(e){
+    setLive('bad','SSE 不可用');
+    setTimeout(connectSSE,5000)
+  }
 }
 connectSSE();
 state.refreshTimer=setInterval(()=>refresh({full:true}),15000);

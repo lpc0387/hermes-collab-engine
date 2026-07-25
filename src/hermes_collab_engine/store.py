@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -53,6 +54,23 @@ CREATE TABLE IF NOT EXISTS run_files (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_run_files_run ON run_files(run_id);
+CREATE TABLE IF NOT EXISTS peer_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    node_id TEXT NOT NULL DEFAULT '',
+    reviewer TEXT NOT NULL,
+    target TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    score INTEGER NOT NULL DEFAULT 5,
+    criteria_json TEXT NOT NULL DEFAULT '{}',
+    suggestions_json TEXT NOT NULL DEFAULT '[]',
+    comments TEXT NOT NULL DEFAULT '',
+    task TEXT NOT NULL DEFAULT '',
+    duration_s REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_peer_reviews_run ON peer_reviews(run_id);
 """
 
 
@@ -74,11 +92,6 @@ class CollabStore:
         import datetime
         now = datetime.datetime.now(datetime.timezone.utc)
         self._engine_start_ts = now.strftime("%Y-%m-%d %H:%M:%S")
-        # Also keep a window (5s) for clock skew between cleanup check and insert
-        import time as _time
-        self._engine_start_ts_with_skew = now.strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )  # use strict equality with created_at (no skew window)
         self._skip_cleanup = skip_cleanup
         with self.lock:
             self.conn.executescript(SCHEMA)
@@ -210,7 +223,7 @@ class CollabStore:
     def _migrate_runs_agent(self) -> None:
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)").fetchall()}
         if "agent" not in columns:
-            self.conn.execute("ALTER TABLE runs ADD COLUMN agent TEXT DEFAULT 'claude-code'")
+            self.conn.execute("ALTER TABLE runs ADD COLUMN agent TEXT DEFAULT 'opencode'")
 
     def _migrate_runs_meta_json(self) -> None:
         """Add runs.meta_json so callers can store per-run metadata such as
@@ -343,19 +356,19 @@ class CollabStore:
             self.conn.commit()
 
     def _execute(self, sql: str, params: tuple = ()):
-        sql = sql.replace("CURRENT_TIMESTAMP", "datetime('now','localtime')")
+        sql = re.sub(r'\bCURRENT_TIMESTAMP\b', "datetime('now','localtime')", sql)
         with self.lock:
             cur = self.conn.execute(sql, params)
             self.conn.commit()
             return cur
 
     def _query(self, sql: str, params: tuple = ()):
-        sql = sql.replace("CURRENT_TIMESTAMP", "datetime('now','localtime')")
+        sql = re.sub(r'\bCURRENT_TIMESTAMP\b', "datetime('now','localtime')", sql)
         with self.lock:
             return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
 
     def _one(self, sql: str, params: tuple = ()):
-        sql = sql.replace("CURRENT_TIMESTAMP", "datetime('now','localtime')")
+        sql = re.sub(r'\bCURRENT_TIMESTAMP\b', "datetime('now','localtime')", sql)
         with self.lock:
             r = self.conn.execute(sql, params).fetchone()
             return dict(r) if r else None
@@ -409,7 +422,7 @@ class CollabStore:
             nodes = []
         return {"run_id": row["run_id"], "paused": bool(row["paused"]), "checkpoint_paused_nodes": [str(node) for node in nodes]}
 
-    def create_run(self, run_id: str, title: str, request: str, complexity: dict[str, Any], agent: str = "claude-code", session_id: str | None = None) -> None:
+    def create_run(self, run_id: str, title: str, request: str, complexity: dict[str, Any], agent: str = "opencode", session_id: str | None = None) -> None:
         self._execute("INSERT INTO runs(id,title,request,status,complexity_json,agent,session_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", (run_id, title, request, "created", json.dumps(complexity, ensure_ascii=False), agent, session_id))
         self.log(run_id, "info", "run created", {"title": title, "agent": agent, "session_id": session_id})
 
@@ -798,44 +811,7 @@ class CollabStore:
             (scope, category, lesson, json.dumps(evidence or {}, ensure_ascii=False), json.dumps(tags or [], ensure_ascii=False)),
         )
 
-    def deduplicate_lessons(self) -> int:
-        """Remove duplicate lessons, keeping the newest per group.
 
-        Groups lessons by (category, scope). Within each group, lessons whose
-        normalized text matches are considered duplicates. Normalization strips
-        run IDs and variable numbers so "Run run_xxx: 3 slow workers" and
-        "Run run_yyy: 1 slow workers" collapse into one.
-
-        Returns:
-            Number of duplicate records removed.
-        """
-        import re as _re
-        rows = self._query(
-            "SELECT id, category, scope, lesson FROM lessons ORDER BY id ASC"
-        )
-        def _normalize(text: str) -> str:
-            """Strip run IDs and numbers for dedup comparison."""
-            t = _re.sub(r'run_[a-f0-9]+', 'run_*', text or '')
-            t = _re.sub(r'\d+', 'N', t)
-            return t[:80]
-        # Track: (category, scope, normalized) -> newest id
-        keep: dict[tuple[str, str, str], int] = {}
-        to_delete: list[int] = []
-        for row in rows:
-            key = (row["category"], row["scope"], _normalize(row["lesson"]))
-            if key in keep:
-                # Duplicate: the earlier entry is older (lower id) — delete it
-                to_delete.append(keep[key])
-                keep[key] = row["id"]
-            else:
-                keep[key] = row["id"]
-        if to_delete:
-            placeholders = ",".join("?" * len(to_delete))
-            self._execute(
-                f"DELETE FROM lessons WHERE id IN ({placeholders})",
-                tuple(to_delete),
-            )
-        return len(to_delete)
 
     def overview(self) -> dict[str, Any]:
         def scalar(sql: str):
@@ -948,8 +924,9 @@ class CollabStore:
         workers = [dict(r) for r in self._query("SELECT * FROM workers WHERE run_id=? ORDER BY started_at DESC", (run_id,))] if include_workers else []
         log_columns = "*" if full else "id,run_id,node_id,level,message,created_at"
         logs = [dict(r) for r in self._query(f"SELECT {log_columns} FROM logs WHERE run_id=? ORDER BY id DESC LIMIT ?", (run_id, log_limit))]
+        peer_reviews = self.get_run_peer_reviews(run_id) if full else []
         task_set = self.task_set(run_id, nodes=nodes)
-        return {"run": dict(run) if run else None, "nodes": nodes, "workers": workers, "logs": logs, "task_set": task_set}
+        return {"run": dict(run) if run else None, "nodes": nodes, "workers": workers, "logs": logs, "peer_reviews": peer_reviews, "task_set": task_set}
 
     def task_set(self, run_id: str, *, nodes: list[dict[str, Any]] | None = None, workers: list[dict[str, Any]] | None = None, logs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         nodes = nodes if nodes is not None else self.get_node_summaries(run_id)
@@ -1057,6 +1034,40 @@ class CollabStore:
         chains.sort(key=lambda c: c["runs"][-1]["created_at"] if c["runs"] else "", reverse=True)
         return chains[:limit]
 
+    def insert_peer_review(
+        self,
+        run_id: str,
+        reviewer: str,
+        target: str,
+        verdict: str,
+        score: int,
+        criteria: dict | None = None,
+        suggestions: list | None = None,
+        comments: str = "",
+        task: str = "",
+        duration_s: float = 0.0,
+        node_id: str = "",
+    ) -> int:
+        """Insert a peer review record and return its ID."""
+        self._execute(
+            "INSERT INTO peer_reviews (run_id,node_id,reviewer,target,verdict,score,"
+            "criteria_json,suggestions_json,comments,task,duration_s) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                run_id, node_id, reviewer, target, verdict, score,
+                json.dumps(criteria or {}),
+                json.dumps(suggestions or []),
+                comments[:500], task[:200], duration_s,
+            ),
+        )
+        return self._execute("SELECT last_insert_rowid()").fetchone()[0]  # type: ignore[index]
+
+    def get_run_peer_reviews(self, run_id: str) -> list[dict[str, Any]]:
+        """Get all peer reviews for a run."""
+        return self._query(
+            "SELECT * FROM peer_reviews WHERE run_id=? ORDER BY created_at",
+            (run_id,),
+        )
+
 
 def get_model_context_limit(model_name: str) -> int:
     """常见模型的 context window 限制"""
@@ -1071,7 +1082,8 @@ def get_model_context_limit(model_name: str) -> int:
         # 默认
         "DEFAULT": 8192,
     }
-    for key, val in limits.items():
+    # Sort by key length descending — more specific (longer) keys match first
+    for key, val in sorted(limits.items(), key=lambda kv: -len(kv[0])):
         if key in model_name.lower():
             return val
     return limits["DEFAULT"]

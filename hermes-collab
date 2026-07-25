@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
-set -euo pipefail
-cd /root/hermes-collab-engine
-exec python3 -m src.hermes_collab_engine.cli "$@"
+#!/bin/bash
+export PYTHONPATH="/root/hermes-collab-engine/src:$PYTHONPATH"
+exec /root/hermes-collab-engine/.venv/bin/python3 -m hermes_collab_engine.cli "$@"

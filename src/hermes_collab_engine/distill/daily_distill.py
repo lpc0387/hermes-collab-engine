@@ -83,7 +83,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", help="Override date label (YYYY-MM-DD)")
     parser.add_argument("--dry-run", action="store_true", help="Compute summary but don't write files")
     args = parser.parse_args(argv)
-    result = run(date=args.date, dry_run=args.dry_run)
+    try:
+        result = run(date=args.date, dry_run=args.dry_run)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
+        return 1
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

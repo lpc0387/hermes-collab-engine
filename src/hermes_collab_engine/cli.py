@@ -162,14 +162,21 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
         agent=agents[0] if agents else "opencode",
         leader_agent=None, worker_agent=agents[0] if agents else None)
 
+
     # Planner: decompose task into WBS nodes
     score = eng.planner.assess(task)
     overall = score.overall if hasattr(score, 'overall') else (score.get('overall', 5) if isinstance(score, dict) else 5)
+    # Force WBS for multi-step tasks (numbered steps like 1)... 2)... 3)...)
+    import re as _re
+    _numbered_steps = len(_re.findall(r'(?:^|\s)\d+[).]\s?', task))
+    if _numbered_steps >= 3:
+        overall = max(overall, 5)
     if overall <= 3:
         nodes = []
     else:
         plan = eng.planner.decompose(task, max_nodes=overall)
         nodes = plan.nodes if plan and hasattr(plan, 'nodes') else []
+
 
     if not nodes or len(nodes) <= 1:
         # Simple task: single dispatch, but still write to DB
@@ -184,6 +191,9 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
     # Multi-node WBS: create run + dispatch each node
     run_id = "run_" + __import__('uuid').uuid4().hex[:12]
     eng.store.create_run(run_id, task[:100], task, {"overall": overall}, agent=agents[0] if agents else "opencode")
+    eng.leader_ctl_dir = f"/tmp/leader_ctl/{run_id}"
+    import os as _os; _os.makedirs(f"{eng.leader_ctl_dir}/nodes", exist_ok=True)
+    print(f"  📋 Leader ctl: {eng.leader_ctl_dir}")
 
     print(f"  📋 WBS: {len(nodes)} nodes")
     for node in nodes:
@@ -225,10 +235,12 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
         eng.store.update_node(n.id, "running", run_id=run_id)
 
         proto.emit_stream(n.id, f"dispatch to {best}...")
-        result = _dispatch_single(best, n.description or n.title, cwd, model, prefix=f"    [{n.id}] ")
+        result = _dispatch_single(best, n.description or n.title, cwd, model,
+                                  prefix=f"    [{n.id}] ", engine=eng, run_id=run_id, node=n)
 
         if result:
             ok = result.get("ok", False)
+            # Node status already updated by engine._run_worker(); this is a double-check
             eng.store.update_node(n.id, "completed" if ok else "failed",
                 result.get('stdout', ''), run_id=run_id,
                 duration_seconds=result.get('dur', 0),
@@ -309,6 +321,20 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
                 "verdict": review.verdict, "score": review.score,
                 "suggestions": review.suggestions}, ensure_ascii=False))
         )
+        # Also write to peer_reviews table for dashboard visibility
+        eng.store.insert_peer_review(
+            run_id=run_id,
+            node_id=dr["node_id"],
+            reviewer=reviewer_agent,
+            target=dr["agent"],
+            verdict=review.verdict,
+            score=review.score,
+            criteria=review.criteria,
+            suggestions=review.suggestions,
+            comments=review.comments,
+            task=dr["node_title"],
+            duration_s=review.duration_s if hasattr(review, 'duration_s') else 0,
+        )
 
         if review.verdict == "reject" and dr["ok"]:
             print(f"      → 标记节点 {dr['node_id']} 为 needs_rework")
@@ -355,29 +381,55 @@ def _run_no_leader_task(task: str, cwd: Path, model: str | None,
         f"Run 状态: {run_status}",
         f"完成节点: {sum(1 for s in node_status.values() if s=='completed')}/{len(nodes)}",
     ])
+    print("\n".join(_summary_lines))
+    print()
 
-    # Store summary as aggregate node result for the web frontend
-    _summary_text = "\n".join(_summary_lines)
-    _summary_data = {"summary": _summary_text, "markdown": _summary_text,
-                     "createdAt": __import__('time').strftime("%Y-%m-%d %H:%M:%S")}
-    # Save as run meta
-    _meta = {"summary": _summary_text, "created_at": __import__('time').strftime("%Y-%m-%d %H:%M:%S")}
-    eng.store._execute("UPDATE runs SET meta_json=? WHERE id=?", (__import__('json').dumps(_meta, ensure_ascii=False), run_id))
-    # Also insert as aggregate log entry so frontend finds it
-    eng.store._execute(
-        "INSERT INTO logs(run_id,node_id,level,message,data_json,created_at) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)",
-        (run_id, "aggregate", "info", "worker finished",
-         __import__('json').dumps(_summary_data, ensure_ascii=False)))
-
+    # ── Peer Review: each successful node reviewed by a different agent ──
 
 def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
-                     prefix: str = "  ", timeout: int = 300) -> dict | None:
+                     prefix: str = "  ", timeout: int = 300,
+                     engine=None, run_id: str | None = None,
+                     node=None) -> dict | None:
     """Dispatch a single task to an agent. Streams output in real-time.
 
-    Shows worker stdout/stderr live during execution.
-    Asks user for interrupt decision if worker stalls.
-    Returns result dict or None on failure.
+    When *engine*, *run_id*, and *node* are provided, the dispatch goes through
+    the engine's ``_run_worker()`` — which uses the leader agent chain (skills,
+    tools, MCP, leader session) and writes worker/node records to DB.
+    Otherwise falls back to direct subprocess (legacy path).
+
+    Returns result dict with keys: ok, stdout, stderr, dur, node_id.
     """
+    # ── Engine path (leader agent chain) ──
+    if engine is not None and run_id is not None and node is not None:
+        from .models import WBSNode as _WBSNode
+        from .agents import get_backend as _get_backend2
+        if not isinstance(node, _WBSNode):
+            node = _WBSNode.from_dict(node) if isinstance(node, dict) else node
+        print(f"{prefix}[{agent}] 经引擎调度...", flush=True)
+        if engine.leader_ctl_dir:
+            print(f"{prefix}  ctl: {engine.leader_ctl_dir}", flush=True)
+        try:
+            # Temporarily set engine's worker_agent to the target agent
+            _saved_wa = engine.worker_agent
+            engine.worker_agent = _get_backend2(agent)
+            try:
+                wr = engine._run_worker(run_id, node, timeout, model_override=model)
+            finally:
+                engine.worker_agent = _saved_wa
+            return {
+                "ok": wr.ok,
+                "stdout": wr.result or "",
+                "stderr": wr.stderr or "",
+                "dur": wr.duration_seconds,
+                "node_id": wr.node_id,
+                "session_id": wr.session_id,
+                "returncode": wr.returncode,
+            }
+        except Exception as e:
+            print(f"{prefix}[{agent}] 引擎调度失败: {e}", flush=True)
+            return {"ok": False, "stdout": "", "stderr": str(e), "dur": 0, "node_id": getattr(node, 'id', '')}
+
+    # ── Legacy direct subprocess path ──
     import subprocess as _sp, time as _time, shutil as _shutil, select as _sel, sys as _sys
     from .agents import get_backend
     try:
@@ -451,17 +503,21 @@ def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
             if _idle > attention_interval and elapsed > 60:
                 print(f"{prefix}  [{_YELLOW}GUARDIAN{_RESET}] "
                       f"{_YELLOW}⚠️ worker 已静默 {_idle:.0f}s（总运行 {elapsed:.0f}s）{_RESET}", flush=True)
-                try:
-                    choice = input(f"{prefix}  是否中断 worker？[y/N] ").strip().lower()
-                    if choice in ("y", "yes"):
-                        proc.kill()
-                        proc.wait(timeout=5)
-                        print(f"{prefix}  [{_RED}已中断{_RESET}]", flush=True)
-                        stdout = "\n".join(stdout_lines[-50:])
-                        return {"ok": False, "stdout": stdout, "stderr": "interrupted by user",
-                                "dur": round(_time.time() - start, 1)}
-                except (EOFError, KeyboardInterrupt):
-                    pass
+                # In non-interactive mode (no TTY), skip the prompt and let timeout handle it
+                if _sys.stdin.isatty():
+                    try:
+                        choice = input(f"{prefix}  是否中断 worker？[y/N] ").strip().lower()
+                        if choice in ("y", "yes"):
+                            proc.kill()
+                            proc.wait(timeout=5)
+                            print(f"{prefix}  [{_RED}已中断{_RESET}]", flush=True)
+                            stdout = "\n".join(stdout_lines[-50:])
+                            return {"ok": False, "stdout": stdout, "stderr": "interrupted by user",
+                                    "dur": round(_time.time() - start, 1)}
+                    except (EOFError, KeyboardInterrupt):
+                        pass
+                else:
+                    print(f"{prefix}  [{_YELLOW}GUARDIAN{_RESET}] 非交互模式，继续等待（超时 {timeout}s）", flush=True)
                 last_output_time = now  # Reset after check
 
             # Hard timeout
@@ -531,6 +587,9 @@ def _run_leader_task(task: str, cwd: Path, model: str | None,
     run_id = "run_" + _uuid.uuid4().hex[:12]
     eng.store.create_run(run_id, task[:100], task, {"overall": overall},
                          agent=agents[0] if agents else "opencode")
+    eng.leader_ctl_dir = f"/tmp/leader_ctl/{run_id}"
+    import os as _os; _os.makedirs(f"{eng.leader_ctl_dir}/nodes", exist_ok=True)
+    print(f"  📋 Leader ctl: {eng.leader_ctl_dir}")
 
     if overall > 3:
         plan = eng.planner.decompose(task, max_nodes=overall)
@@ -581,7 +640,8 @@ def _run_leader_task(task: str, cwd: Path, model: str | None,
 
         # Dispatch
         result = _dispatch_single(best, n.description or n.title, cwd, model,
-                                  prefix=f"    [{n.id[:10]}] ")
+                                  prefix=f"    [{n.id[:10]}] ",
+                                  engine=eng, run_id=run_id, node=n)
 
         if result and result.get("ok"):
             eng.store.update_node(n.id, "completed", result.get("stdout", ""),
@@ -1009,7 +1069,15 @@ def main() -> int:
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2))
         else:
-            print(json.dumps(data, ensure_ascii=False, indent=2))
+            ov = data.get("overview", {})
+            runs = data.get("runs", [])
+            print(f"Runs: {ov.get('total_runs', '?')}  |  "
+                  f"Completed: {ov.get('completed_runs', '?')}  |  "
+                  f"Running: {ov.get('running_runs', '?')}  |  "
+                  f"Failed: {ov.get('failed_runs', '?')}")
+            if runs:
+                for r in runs[:5]:
+                    print(f"  {r.get('status', '?'):>10}  {r.get('id', ''):<20}  {r.get('title', '')[:60]}")
         return 0
 
     if args.cmd == "agents":
@@ -1024,41 +1092,38 @@ def main() -> int:
         return 0
 
     if args.cmd == "skills":
-        from .skills import get_default_registry
-        registry = get_default_registry()
+        from .registry import get_unified_registry, SkillEntry
+        registry = get_unified_registry()
         if args.node_type:
-            skills = registry.select_for_node(args.node_type, args.task)
+            skills = registry.select_skills(args.node_type, args.task)
         else:
-            skills = registry.list_all()
+            skills = registry.list_by_type(SkillEntry)
         if args.json:
             print(json.dumps([skill.to_dict() for skill in skills], ensure_ascii=False, indent=2))
         else:
             for skill in skills:
-                node_types = ",".join(skill.applicable_node_types)
-                print(f"  {skill.name:22s} p{skill.priority} {skill.category:12s} [{node_types}] {skill.display_name}")
+                caps = ",".join(skill.capabilities)
+                print(f"  {skill.name:22s} p{skill.priority} {skill.category:12s} [{caps}] {skill.display_name}")
         return 0
 
     if args.cmd == "tools":
-        from .tools import get_default_tool_registry
-        registry = get_default_tool_registry()
+        from .registry import get_unified_registry, ToolEntry
+        registry = get_unified_registry()
         if args.node_type:
-            profiles = registry.select_for_node(args.node_type, args.task)
+            profiles = registry.select_tools(args.node_type, args.task)
         else:
-            profiles = registry.list_all()
+            profiles = registry.list_by_type(ToolEntry)
         if args.json:
             print(json.dumps([profile.to_dict() for profile in profiles], ensure_ascii=False, indent=2))
         else:
             for profile in profiles:
-                node_types = ",".join(profile.applicable_node_types)
-                mcp = " mcp" if profile.mcp_tools else ""
-                print(f"  {profile.name:22s} p{profile.priority} {profile.category:12s}{mcp:4s} [{node_types}] {profile.display_name}")
+                caps = ",".join(profile.capabilities)
+                print(f"  {profile.name:22s} p{profile.priority} {profile.category:12s} [{caps}] {profile.display_name}")
         return 0
 
     if args.cmd == "mcp-server":
-        from .store import CollabStore
         from .registry import get_unified_registry
-        store = CollabStore(args.db)
-        registry = get_unified_registry(store=store)
+        registry = get_unified_registry()
 
         if args.mcp_server_cmd == "list":
             servers = registry.list_mcp_servers()
@@ -1458,7 +1523,11 @@ def main() -> int:
             if args.json:
                 print(json.dumps(data, ensure_ascii=False, indent=2))
             else:
-                print(json.dumps(data, ensure_ascii=False, indent=2))
+                for k, v in data.items():
+                    if isinstance(v, (list, dict)):
+                        print(f"{k}: {json.dumps(v, ensure_ascii=False)[:200]}")
+                    else:
+                        print(f"{k}: {v}")
             return 0
 
         if args.config_cmd == "set":

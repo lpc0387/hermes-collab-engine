@@ -33,8 +33,6 @@ _TOKEN_PATTERNS: list[tuple[str, str, re.Pattern]] = [
 ]
 """Ordered list of (prefix, label, compiled regex) for ``mask_token``."""
 
-_DEFAULT_MAX_KEEP = 5
-"""Default number of backup files to retain."""
 
 
 # ---------------------------------------------------------------------------

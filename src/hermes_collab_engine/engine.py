@@ -6,6 +6,7 @@ import json
 import fnmatch
 import queue
 import shutil
+import sys
 import logging
 import os
 import re
@@ -19,9 +20,7 @@ from typing import Any
 from .agents import get_backend, AgentBackend, SessionHandle
 from .models import Plan, RiskPolicy, CheckpointDecision, WBSNode, WorkerResult
 from .planner import Planner
-from .skills import SkillRegistry, get_default_registry
 from .store import CollabStore
-from .tools import ToolRegistry, get_default_tool_registry
 from .registry import get_unified_registry, SkillEntry as USkillEntry, ToolEntry as UToolEntry, MCPEntry as UMCPEntry
 from .skill_distributor import SkillDistributor
 
@@ -47,11 +46,11 @@ class CollabEngine:
         leader_model: str | None = None,
         worker_model: str | None = None,
         agent: str = "opencode",
-        leader_agent: str | None = "hermes",
+        leader_agent: str | None = None,
         worker_agent: str | None = None,
 
-        skill_registry: SkillRegistry | None = None,
-        tool_registry: ToolRegistry | None = None,
+        skill_registry: Any = None,
+        tool_registry: Any = None,
         provider: Any = None,
         global_max_concurrent: int = 4,
     ):
@@ -65,9 +64,9 @@ class CollabEngine:
             try:
                 _lead = get_backend(leader_agent)
                 # Verify the binary exists on PATH
-                import shutil as _shutil
+                
                 _binary = _lead.command[0]
-                if _shutil.which(_binary) is None:
+                if shutil.which(_binary) is None:
                     print(f"warning: leader agent '{_binary}' not found on PATH, falling back to worker agent")
                     self.leader_agent = None
                 else:
@@ -77,16 +76,14 @@ class CollabEngine:
                 self.leader_agent = None
         self.worker_agent: AgentBackend | None = get_backend(worker_agent) if worker_agent else None
         self.provider = provider
-        self.skill_registry = skill_registry or get_default_registry()
-        self.tool_registry = tool_registry or get_default_tool_registry()
+        # Initialize unified registry (loads skills + tools + MCP)
+        from .registry import UnifiedRegistry
+        self.unified_registry = get_unified_registry()
         self._skill_distributor = SkillDistributor(
-            skill_registry=self.skill_registry,
-            tool_registry=self.tool_registry,
+            unified_registry=self.unified_registry,
         )
         self.store = CollabStore(db_path, skip_cleanup=True)
         # Load agent profiles for leader/worker model overrides
-        # Initialize unified registry with store for persistence
-        get_unified_registry(store=self.store)
         # Read stored model_config from DB and override
         try:
             _mc = self.store.get_setting("model_config") or {}
@@ -150,6 +147,14 @@ class CollabEngine:
         self._worker_profile: dict[str, str] | None = profiles["worker"]
         self._restore_all_run_states()
 
+    @property
+    def skill_registry(self):
+        return self.unified_registry
+
+    @property
+    def tool_registry(self):
+        return self.unified_registry
+
     def _load_agent_profiles(self) -> dict[str, dict[str, str] | None]:
         """Load leader and worker profiles from data/agents.db.
 
@@ -198,160 +203,6 @@ class CollabEngine:
                 "Failed to load agent profiles from %s", db_path, exc_info=True
             )
             return {"leader": None, "worker": None}
-
-    def _summarize_package_plan(self, package: str) -> str:
-        """Render a one-line plan summary for a package.
-
-        Reads the graph definition from packages.sqlite3 via
-        ``backend.graph_interpreter`` and returns ``summarize_text(graph)``
-        — or "" if the package has no graph yet or the interpreter
-        is unavailable.
-        """
-        try:
-            import sys
-            # Ensure backend/ is importable regardless of how the
-            # engine was launched (cron, CLI, in-process test).
-            backend_src = str(self.cwd / "src")
-            if backend_src not in sys.path:
-                sys.path.insert(0, backend_src)
-            from backend.graph_interpreter import summarize_text
-            from backend.skill_graph import SkillGraph
-            from backend.scenario_packages import get_package
-            db_path = self.cwd / "data" / "packages.sqlite3"
-            if not db_path.exists():
-                return ""
-            pkg = get_package(package, db_path=str(db_path))
-            if not pkg:
-                return ""
-            graph_def = pkg.get("graph_definition") or {}
-            if not graph_def:
-                return ""
-            graph = SkillGraph.from_dict(graph_def)
-            return summarize_text(graph)
-        except Exception as exc:
-            logging.getLogger(__name__).debug(
-                "_summarize_package_plan failed for %s: %s", package, exc
-            )
-            return ""
-
-    def _render_package_plan(self, package_name: str, graph_def: dict) -> str:
-        """Render a detailed human-readable execution plan for a package.
-
-        Walks the topological steps of *graph_def*, describing each step's
-        type, associated skill, input mapping, condition branches, parallel
-        forks, etc.  The result is appended to ``plan.shared_brief`` so
-        downstream workers understand the intended execution flow.
-
-        Args:
-            package_name: Name of the scenario package.
-            graph_def: Dict representation of the SkillGraph (as stored in
-                       ``packages.sqlite3.packages.graph_definition``).
-
-        Returns:
-            Multi-line string describing the plan, or an empty string if
-            *graph_def* has no steps.
-        """
-        from backend.skill_graph import SkillGraph, SkillEdge
-
-        if not graph_def or not isinstance(graph_def, dict):
-            return ""
-        try:
-            graph = SkillGraph.from_dict(graph_def)
-        except (KeyError, ValueError, TypeError) as exc:
-            logging.getLogger(__name__).debug(
-                "_render_package_plan: from_dict failed for %s: %s",
-                package_name, exc,
-            )
-            return ""
-        if not graph.steps:
-            return ""
-
-        lines: list[str] = []
-        lines.append(f"## Package Plan: {graph.display_name} ({package_name})")
-        lines.append(f"Description: {graph.description}")
-        lines.append(f"Entry point: {graph.entry_point}")
-        lines.append(f"Exit points: {', '.join(graph.exit_points) if graph.exit_points else 'N/A'}")
-
-        # Topological order
-        try:
-            topo_order = graph.topological_sort()
-        except ValueError:
-            lines.append("⚠️  Graph contains cycles — cannot determine execution order.")
-            topo_order = list(graph.steps.keys())
-
-        lines.append(f"Steps ({len(topo_order)} total):")
-        for idx, step_id in enumerate(topo_order, 1):
-            step = graph.steps.get(step_id)
-            if step is None:
-                lines.append(f"  {idx}. **{step_id}** — (unknown)")
-                continue
-            deps = self._step_dependencies(step_id, graph)
-            dep_str = f" (depends on: {', '.join(deps)})" if deps else ""
-            lines.append(f"  {idx}. **{step.name}** [{step.step_type.value}]{dep_str}")
-            lines.append(f"     {self._describe_step(step)}")
-
-        lines.append("")
-        return "\n".join(lines)
-
-    def _describe_step(self, step: "Any") -> str:
-        """Return a human-readable one-line description of a skill step.
-
-        Args:
-            step: A ``SkillStep`` instance.
-
-        Returns:
-            Single-line description string.
-        """
-        from backend.skill_graph import StepType
-
-        st = step.step_type
-        if st == StepType.SKILL:
-            skill_name = step.skill_name or step.name
-            entry = self.skill_registry.get(skill_name)
-            desc = entry.description if entry else ""
-            im = step.input_mapping or {}
-            parts = [f"Skill: **{skill_name}**"]
-            if desc:
-                parts.append(f"({desc[:120]})")
-            if im:
-                mapping_str = ", ".join(f"{k} ← {v}" for k, v in im.items())
-                parts.append(f"inputs: [{mapping_str}]")
-            return " ".join(parts)
-        elif st == StepType.CONDITION:
-            parts = [f"Condition: `{step.condition or '(empty)'}`"]
-            if step.true_branch:
-                parts.append(f"→ true: **{step.true_branch}**")
-            if step.false_branch:
-                parts.append(f"→ false: **{step.false_branch}**")
-            return " | ".join(parts)
-        elif st == StepType.LOOP:
-            body = ", ".join(step.loop_body) if step.loop_body else "(empty)"
-            return (
-                f"Loop: max {step.max_iterations} iterations | "
-                f"body: [{body}] | "
-                f"condition: `{step.loop_condition or 'none'}`"
-            )
-        elif st == StepType.PARALLEL:
-            children = ", ".join(step.parallel_steps) if step.parallel_steps else "(empty)"
-            return f"Parallel: fork into [{children}]"
-        elif st == StepType.HUMAN:
-            return "Human-in-the-loop: awaiting manual input"
-        else:
-            return f"Step type: {st}"
-
-    def _step_dependencies(self, step_id: str, graph: "Any") -> list[str]:
-        """Return IDs of steps that *step_id* depends on (incoming edges).
-
-        Args:
-            step_id: The step to find dependencies for.
-            graph: A ``SkillGraph`` instance.
-
-        Returns:
-            Sorted list of dependency step IDs.
-        """
-        return sorted(
-            edge.from_step for edge in graph.edges if edge.to_step == step_id
-        )
 
     def _persist_run_state(self, run_id: str) -> None:
         self.store.save_run_state(run_id, run_id in self._paused_runs, self._checkpoint_paused_nodes)
@@ -411,18 +262,18 @@ class CollabEngine:
                 for row in rows:
                     run_id = row["id"]
                     # Close all worker sessions and save their agent session IDs
-                    for node_id, handle in list(self._worker_sessions.items()):
-                        try:
-                            self.agent_backend.close_session(handle)
-                        except Exception:
-                            pass
-                        if handle.session_id:
+                    with self._worker_procs_lock:
+                        for node_id, handle in list(self._worker_sessions.items()):
                             try:
-                                self.store.save_agent_session(session_id, handle.session_id)
+                                self.agent_backend.close_session(handle)
                             except Exception:
                                 pass
-                    # Clean up worker tracking
-                    with self._worker_procs_lock:
+                            if handle.session_id:
+                                try:
+                                    self.store.save_agent_session(session_id, handle.session_id)
+                                except Exception:
+                                    pass
+                        # Clean up worker tracking
                         self._worker_sessions.clear()
                         self._worker_procs.clear()
                     # Mark run as paused
@@ -460,83 +311,7 @@ class CollabEngine:
             "checkpoint_paused_nodes": sorted(self._checkpoint_paused_nodes),
         }
 
-    def _build_package_plan(self, graph, request: str, run_id: str, package_name: str, context_vars: dict) -> list:
-        """Convert SkillGraph steps into WBSNode list for the run() loop.
-
-        Each step in the graph becomes a WBS implementation node.
-        Dependencies (edges) are encoded as node.depends_on.
-        The Leader run loop in run() dispatches them in topological order.
-
-        When a step references a skill_name, loads the prompt_template
-        from the engine's SkillRegistry instead of using inline params.
-        """
-        from engine.models import WBSNode, Plan
-        import logging
-
-        topo_order = []
-        try:
-            topo_order = graph.topological_sort()
-        except Exception:
-            topo_order = list(graph.steps.keys())
-
-        nodes = []
-        prev_step_id = None
-        for step_id in topo_order:
-            step = graph.steps.get(step_id)
-            if not step:
-                continue
-
-            step_name = step.name or step_id
-            skill_name = getattr(step, 'skill_name', "")
-
-            # Load prompt from SkillRegistry if step references a registered skill
-            prompt_template = None
-            if skill_name:
-                skill_entry = self.skill_registry.get(skill_name)
-                if skill_entry and getattr(skill_entry, 'content', None):
-                    prompt_template = skill_entry.content
-                else:
-                    logging.getLogger(__name__).debug(
-                        "Skill %s not found in registry for step %s, fallback to inline",
-                        skill_name, step_id)
-
-            # Fallback to inline params
-            if not prompt_template:
-                skill_params = getattr(step, 'skill_params', {}) or getattr(step, 'params', {})
-                prompt_template = skill_params.get("prompt", skill_params.get("prompt_template",
-                    f"执行步骤: {step_name}"))
-
-            # Render template with context_vars
-            from string import Template
-            try:
-                filled_prompt = Template(prompt_template).safe_substitute(context_vars)
-            except Exception:
-                filled_prompt = prompt_template
-
-            # Create WBS node
-            from engine.models import WBSNode
-            node = WBSNode(
-                id=step_id,
-                title=step_name,
-                capability="implementation",
-                description=filled_prompt,
-                complexity=3,
-                dependencies=[],
-                parallelizable=False,
-                deliverable="",
-            )
-            # Set node-specific brief: only this step's task, not the full plan
-            node.brief = f"步骤: {step_name}" + (f"\n{step.description[:1000]}" if getattr(step, 'description', None) else "")
-            # Set dependency if not first step
-            if prev_step_id:
-                node.dependencies = [prev_step_id]
-            prev_step_id = step_id
-
-            nodes.append(node)
-
-        return nodes
-
-    def run(self, request: str, *, title: str | None = None, concurrency: int = 4, timeout: int = 86400, max_retries: int = 2, split_count: int = 4, aggregate: bool = True, package: str | None = None, package_skills: list[str] | None = None, session_id: str | None = None, prev_session_id: str | None = None, run_id: str | None = None) -> dict:
+    def run(self, request: str, *, title: str | None = None, concurrency: int = 4, timeout: int = 86400, max_retries: int = 2, split_count: int = 4, aggregate: bool = True, session_id: str | None = None, prev_session_id: str | None = None, run_id: str | None = None) -> dict:
         run_id = run_id or ("run_" + uuid.uuid4().hex[:12])
         score = self.planner.assess(request)
         self.store.create_run(run_id, title or request[:80], request, score.to_dict(), agent=self.agent_backend.name, session_id=session_id)
@@ -554,115 +329,17 @@ class CollabEngine:
         _watchdog_thread.start()
         # Touch the session so watchdog knows this session is active
         self._touch_session(session_id)
-        # Persist package + the Skill collection it triggered so the dashboard
-        # and downstream workers can see which scenario Leader picked.
-        # If a package is set, also try to read its graph definition and
-        # render a one-line plan summary via graph_interpreter.summarize_text
-        # so the chat bubble can show "📋 Run 4 steps (3 skill, ...)".
-        package_plan: str = ""
-        package_graph_def: dict | None = None
-        if package:
-            package_plan = self._summarize_package_plan(package)
-            # Read the full graph_def for detailed plan rendering
-            try:
-                from backend.scenario_packages import get_package
-                pkg = get_package(package, db_path=str(self.cwd / "data" / "packages.sqlite3"))
-                if pkg:
-                    package_graph_def = pkg.get("graph_definition")
-            except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    "Failed to read graph_def for package %s: %s", package, exc,
-                )
-        if package or package_skills:
-            # Build per-node skill mapping from graph definition steps
-            node_skill_map = {}
-            if package_graph_def and isinstance(package_graph_def, dict):
-                steps = package_graph_def.get("steps", {})
-                if isinstance(steps, dict):
-                    for sid, sdef in steps.items():
-                        if isinstance(sdef, dict):
-                            sk = sdef.get("skill_name", "")
-                            if sk:
-                                node_skill_map[sid] = sk
-            self.store.set_run_meta(run_id, {
-                "package": package,
-                "package_skills": list(package_skills or []),
-                "node_skill_map": node_skill_map,
-                "package_plan": package_plan,
-            })
-
-        # ── SkillGraph → WBS plan ──
-        # When a package has a SkillGraph, convert its steps into WBS nodes
-        plan_from_graph = None
-        self._graph_node_ids: set[str] | None = None
-        if package:
-            logging.getLogger(__name__).info(
-                "SkillGraph check: package=%s, graph_def_type=%s",
-                package, type(package_graph_def).__name__ if package_graph_def is not None else "None")
-            if package_graph_def and isinstance(package_graph_def, dict):
-                try:
-                    from backend.skill_graph import SkillGraph
-                    graph = SkillGraph.from_dict(package_graph_def)
-                    if graph and graph.steps:
-                        # Get context variables from site_map
-                        context_vars = {"target_url": "https://mail.qq.com",
-                                        "site_name": "", "user_request": request}
-                        try:
-                            from backend import site_map
-                            match_result = site_map.match(request)
-                            if match_result.get("target_url"):
-                                context_vars["target_url"] = match_result["target_url"]
-                            if match_result.get("site_name"):
-                                context_vars["site_name"] = match_result["site_name"]
-                        except Exception:
-                            pass
-                        # Build nodes from graph
-                        graph_nodes = self._build_package_plan(
-                            graph, request, run_id, package, context_vars)
-                        if graph_nodes:
-                            from engine.models import Plan
-                            plan_from_graph = Plan(nodes=graph_nodes, shared_brief=(
-                                f"SkillGraph plan: {len(graph_nodes)} steps"
-                            ))
-                            self._graph_node_ids = {n.id for n in graph_nodes}
-                            self.store.log(run_id, "info",
-                                           f"skillgraph plan: {len(graph_nodes)} nodes from {package}")
-                except Exception as exc:
-                    logging.getLogger(__name__).warning(
-                        "SkillGraph plan failed, falling back to WBS: %s", exc)
-            else:
-                logging.getLogger(__name__).info(
-                    "SkillGraph check: graph_def not a dict, type=%s",
-                    type(package_graph_def).__name__)
-
-        if plan_from_graph:
-            plan = plan_from_graph
-        elif score.routing == "direct":
-            self._direct_mode = True
-            return self._run_direct(run_id, request, score, package, session_id, timeout)
-        elif score.routing == "single":
-            plan = self.planner.fallback_wbs(request, score=score)
-        else:
-            plan = self.planner.decompose(
-                request,
-                capabilities=self.agent_backend.capabilities,
-                agent_backend=self.agent_backend,
-                package=package,
-                package_graph_def=package_plan or None,
-                score=score,
-            )
+        plan = self.planner.decompose(request, score=score)
         if isinstance(plan, list):
             plan = Plan(nodes=plan)
-        # Append detailed package plan to shared_brief so downstream
-        # workers understand the intended execution flow.
-        if package_graph_def:
-            rendered = self._render_package_plan(package or "", package_graph_def)
-            if rendered:
-                if plan.shared_brief:
-                    plan.shared_brief += "\n" + rendered
-                else:
-                    plan.shared_brief = rendered
         nodes = plan.nodes
+        # Build task_requirements from plan nodes for leader review
+        plan.task_requirements = [
+            {"id": f"req-{i+1}", "description": n.deliverable or n.description,
+             "node_id": n.id, "deliverable": n.deliverable}
+            for i, n in enumerate(nodes)
+        ]
+        self.store.set_run_meta(run_id, {"task_requirements": plan.task_requirements})
         if plan.shared_brief:
             self.store.log(run_id, "info", "shared plan brief created", {"shared_brief": plan.shared_brief})
             for node in nodes:
@@ -776,7 +453,7 @@ class CollabEngine:
                 "lessons_learned": [],
                 "abort_reason": f"wbs_persistence_incomplete: missing {missing}",
             }
-        self._preallocate_skills_tools(run_id, nodes, task_type=plan.task_type)
+        self._preallocate_skills_tools(run_id, nodes, task_type=getattr(plan, 'task_type', 'development'))
         self._restore_run_state(run_id)
         # Override with this run's own checkpoint_paused state
         run_state = self.store.load_run_state(run_id)
@@ -1155,29 +832,28 @@ class CollabEngine:
             ok = not failed_final and (final.ok if final else True)
             self.store.update_run(run_id, "completed" if ok else "failed")
 
-            # ── Suggested skills from WBS-generated nodes ──
-            suggested = []
-            if ok and self._graph_node_ids:
-                for r in results:
-                    node_id = getattr(r, 'node_id', '')
-                    if node_id and node_id not in self._graph_node_ids:
-                        if hasattr(r, 'title') and r.title:
-                            title = r.title or node_id
-                            desc = (r.result or "")[:200]
-                            suggested.append({
-                                "name": node_id.replace("-", "_"),
-                                "display_name": title,
-                                "description": desc[:100],
-                                "prompt_template": f"执行以下任务：{title}\n\n详细说明：{desc}",
-                                "category": "generated",
-                            })
-                if suggested:
-                    self.store.set_run_meta(run_id, {
-                        "suggested_skills": suggested,
-                    })
-                    self.store.log(run_id, "info",
-                                   f"suggested {len(suggested)} skill(s) from WBS overflow",
-                                   {"suggested": suggested})
+            # Leader review: LLM evaluates each node's output against task_requirements
+            review_text = None
+            try:
+                review_text = self._leader_review(run_id, request, plan, results)
+            except Exception as _rev_e:
+                self.store.log(run_id, "warning", "leader review failed, using fallback summary",
+                               {"error": str(_rev_e)[:200]})
+            if review_text:
+                self.store.set_run_meta(run_id, {"leader_review": review_text})
+                self.store.log(run_id, "info", "worker finished", {
+                    "result": review_text,
+                }, node_id="aggregate")
+            else:
+                # Fallback: simple summary if LLM review fails
+                _simple = "\n".join([
+                    f"Run {run_id} — {len(results)} nodes",
+                    *[f"  {'✅' if _r.ok else '❌'} {_r.node_id}: {(_r.result or '')[:100]}"
+                      for _r in results]
+                ])
+                self.store.log(run_id, "info", "worker finished", {
+                    "result": _simple,
+                }, node_id="aggregate")
 
             self.store.log(run_id, "info" if ok else "error", "run finished", {"ok": ok})
             # Scan output/ for files generated during this run
@@ -1393,8 +1069,6 @@ class CollabEngine:
         # 5. User --split-count hard cap
         target = min(target, split_count)
 
-        # Store the computed shard count for _split_node
-        self._proactive_shard_count = target
         return target > 1
 
     # ── Resource monitoring ────────────────────────────────────────────
@@ -1593,41 +1267,6 @@ class CollabEngine:
         return new_node
 
     MAX_RECOVERIES = 3
-
-    def _leader_guard_run(self, run_id: str, request: str,
-                          failed_node_ids: list[str], remaining_node_ids: list[str],
-                          elapsed: float, timeout: int) -> str:
-        """Tier 3: Ask the leader whether the entire run should continue."""
-        prompt = (
-            f"You are the Leader orchestrating a multi-worker run.\n\n"
-            f"Run request: {request[:500]}\n"
-            f"Elapsed time: {elapsed:.0f}s / Budget: {timeout}s\n\n"
-            f"Failed nodes: {failed_node_ids or 'none'}\n"
-            f"Remaining nodes: {remaining_node_ids or 'none'}\n\n"
-            f"Decide whether to continue with remaining work or abort the run.\n"
-            f"Return ONLY a JSON object on the final line, prefixed by "
-            f"HERMES-COLLAB-RESULT:\n"
-            f'{{"action":"continue|abort","reason":"brief justification"}}'
-        )
-        mock_node = WBSNode(f"{run_id}-guard", "Run guard assessment",
-                            prompt, "planning", 1, [], True, "decision")
-        try:
-            wr = self._run_worker(run_id, mock_node, 30,
-                                   model_override=self.leader_model, role="leader")
-        except Exception as exc:
-            self.store.log(run_id, "error",
-                           "leader run guard crashed", {"error": str(exc)})
-            return "continue"
-        text = wr.result or ""
-        _, parsed = self._parse_result_contract(text)
-        if not isinstance(parsed, dict):
-            return "continue"
-        action = parsed.get("action", "continue")
-        reason = parsed.get("reason", "")
-        if action == "abort":
-            self.store.log(run_id, "warning", "leader aborted the run",
-                           {"reason": reason})
-        return action
 
     def _record_node_result(self, run_id: str, result: WorkerResult) -> None:
         result_text = result.result or ''
@@ -1979,6 +1618,8 @@ class CollabEngine:
         plan = self._current_plan
         if plan is None or not plan.shared_brief:
             return ""
+        if node.capability != "implementation":
+            return ""
         if plan.shared_brief in (node.brief or ""):
             return ""
         return f"Completed work summary (upstream workers):\n{plan.shared_brief}\n\n"
@@ -2001,11 +1642,7 @@ class CollabEngine:
         bundle), the package's Skill collection is treated as the canonical
         skill set for *every* node unless a node already has skills_json.
         """
-        self.skill_registry.refresh()
         native_caps = set(self.agent_backend.capabilities)
-        package_meta = self.store.get_run_meta(run_id) or {}
-        package_skills: list[str] = list(package_meta.get("package_skills") or [])
-        node_skill_map: dict = package_meta.get("node_skill_map") or {}
         for node in nodes:
             try:
                 # Respect leader-assigned values; only fill gaps via distributor
@@ -2017,10 +1654,6 @@ class CollabEngine:
                     #   4. None → fall back to capability default
                     if node.skills_json:
                         leader_skills = json.loads(node.skills_json)
-                    elif node.id in node_skill_map:
-                        leader_skills = [node_skill_map[node.id]]
-                    elif package_skills:
-                        leader_skills = list(package_skills)
                     else:
                         leader_skills = None
 
@@ -2028,8 +1661,6 @@ class CollabEngine:
                         node_capability=node.capability,
                         leader_skills=leader_skills,
                         agent_backend=self.agent_backend,
-                        task_type=task_type,
-                        task_description=node.description,
                     )
                     if not node.skills_json:
                         node.skills_json = json.dumps(skill_names)
@@ -2044,28 +1675,6 @@ class CollabEngine:
             except Exception:
                 # Pre-allocation failure is non-fatal; worker falls back to per-worker selection
                 self.store.log(run_id, "warning", "skill/tool pre-allocation failed", {"node": node.id}, node.id)
-
-    def _is_hermes_builtin_skill(self, name: str) -> bool:
-        """Check if a skill name refers to a built-in hermes skill."""
-        entry = self.skill_registry.get(name)
-        if entry is not None:
-            return getattr(entry, "source", "hermes") == "hermes"
-        unified = get_unified_registry()
-        for us in unified.list_by_type(USkillEntry):
-            if us.name == name:
-                return us.source == "hermes"
-        return False
-
-    def _is_hermes_builtin_tool(self, name: str) -> bool:
-        """Check if a tool profile name refers to a built-in hermes tool."""
-        entry = self.tool_registry.get(name)
-        if entry is not None:
-            return getattr(entry, "source", "hermes") == "hermes"
-        unified = get_unified_registry()
-        for ut in unified.list_by_type(UToolEntry) + unified.list_by_type(UMCPEntry):
-            if ut.name == name:
-                return ut.source == "hermes"
-        return False
 
     def _env_for_role(self, role: str) -> dict[str, str]:
         prefix = f"HERMES_COLLAB_{role.upper()}_"
@@ -2127,9 +1736,7 @@ class CollabEngine:
                         runtime_config = json.load(f)
                 except (json.JSONDecodeError, OSError):
                     pass
-            _ANTHROPIC_DEFAULTS: dict[str, str] = {
-                "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
-            }
+            _ANTHROPIC_DEFAULTS: dict[str, str] = {}
             field_map: dict[str, str] = {
                 "base_url": "ANTHROPIC_BASE_URL",
                 "api_key": "ANTHROPIC_API_KEY",
@@ -2360,21 +1967,20 @@ class CollabEngine:
         return None
 
     def _run_worker(self, run_id: str, node: WBSNode, timeout: int, model_override: str | None = None, role: str = "worker") -> WorkerResult:
-        # Resolve per-role agent
-        _saved_agent = self.agent_backend
+        # Resolve per-role agent without mutating self.agent_backend (thread-safe)
+        backend = self.agent_backend
         if role == "leader" and self.leader_agent:
-            self.agent_backend = self.leader_agent
+            backend = self.leader_agent
         elif role == "worker" and self.worker_agent:
-            self.agent_backend = self.worker_agent
-        try:
-            return self._run_worker_impl(run_id, node, timeout, model_override, role)
-        finally:
-            self.agent_backend = _saved_agent
+            backend = self.worker_agent
+        return self._run_worker_impl(run_id, node, timeout, model_override, role, backend=backend)
 
-    def _run_worker_impl(self, run_id: str, node: WBSNode, timeout: int, model_override: str | None = None, role: str = "worker") -> WorkerResult:
+    def _run_worker_impl(self, run_id: str, node: WBSNode, timeout: int, model_override: str | None = None, role: str = "worker", backend: AgentBackend | None = None) -> WorkerResult:
+        if backend is None:
+            backend = self.agent_backend
         worker_id = f"worker_{run_id}_{node.id}_{node.attempt}"
         self.store.worker_start(worker_id, run_id, node.id)
-        self.store.log(run_id, "info", "worker started", {"node": node.id, "title": node.title, "agent": self.agent_backend.name}, node.id)
+        self.store.log(run_id, "info", "worker started", {"node": node.id, "title": node.title, "agent": backend.name}, node.id)
         started = time.time()
         upstream_block = self._build_upstream_context(node)
         shared_brief_block = self._shared_brief_for_worker(node)
@@ -2387,17 +1993,16 @@ class CollabEngine:
             skill_names, tool_profile_names = self._skill_distributor.resolve_for_node(
                 node_capability=node.capability,
                 leader_skills=None,
-                agent_backend=self.agent_backend,
+                agent_backend=backend,
             )
             node.skills_json = json.dumps(skill_names)
             node.tools_json = json.dumps(tool_profile_names)
-        mcp_servers = self._skill_distributor.resolve_mcp(skill_names, self.agent_backend.name)
+        mcp_servers = self._skill_distributor.resolve_mcp(skill_names, backend.name)
         skills_block, tools_block, mcp_block = self._skill_distributor.render_for_prompt(
             skill_names, tool_profile_names, mcp_servers,
         )
         # Resolve allowed_tools for the tool whitelist
         tool_allowed = tool_profile_names
-        backend = self.agent_backend
         # Tool manager acts as whitelist: if profiles matched, use only their tools;
         # if no profiles matched, fall back to backend defaults
         if tool_allowed:
@@ -2453,6 +2058,9 @@ Output contract:
                    + "\n...[FINAL ARG_MAX SAFETY TRUNCATION: " + str(len(_pb2)) + " bytes > 900KB limit]...\n" \
                    + _pb2[-_half2:].decode("utf-8", errors="ignore")
         selected_model = model_override or self.worker_model
+        # Apply backend auto_prefix (e.g. "opencode-go/") for both session and one-shot paths
+        if backend.auto_prefix and selected_model and not selected_model.startswith(backend.auto_prefix):
+            selected_model = backend.auto_prefix + selected_model
 
         # If prompt is too long for command-line args, use stdin via temp file.
         # Only applies to backends with a prompt_flag (e.g. claude -p "...");
@@ -2567,6 +2175,20 @@ Output contract:
             except (FileNotFoundError, OSError):
                 _stdout_text = ""
                 _stderr_text = ""
+            # Filter codex PTY startup banner from stderr
+            if backend and backend.name == "codex" and _stderr_text:
+                _stderr_lines = _stderr_text.split("\n")
+                _filtered = []
+                _skip_count = 0
+                for _line in _stderr_lines:
+                    if any(_s in _line for _s in [
+                        "OpenAI Codex", "Reading additional", "--------",
+                        "workdir:", "model:", "provider:", "sandbox:",
+                    ]):
+                        _skip_count += 1
+                        continue
+                    _filtered.append(_line)
+                _stderr_text = "\n".join(_filtered)
             proc.stdout = _stdout_text
             proc.stderr = _stderr_text
         except subprocess.TimeoutExpired as exc:
@@ -2599,6 +2221,16 @@ Output contract:
                     backend.close_session(_handle)
                 except Exception:
                     pass
+            # Codex cleanup: kill orphaned codex processes
+            if backend and backend.name == "codex" and proc:
+                try:
+                    _pgid = os.getpgid(proc.pid)
+                    os.killpg(_pgid, 9)  # SIGKILL
+                except (ProcessLookupError, PermissionError, AttributeError):
+                    pass
+                import subprocess as _sp_codex
+                _sp_codex.run(["pkill", "-9", "-f", "codex.*exec"],
+                             capture_output=True, timeout=5)
             for _p in (_tmp_stdout_path, _tmp_stderr_path):
                 try: os.unlink(_p)
                 except OSError: pass
@@ -2614,7 +2246,7 @@ Output contract:
             return result
 
         # Use agent backend to parse output
-        parsed = self.agent_backend.parse_output(
+        parsed = backend.parse_output(
             stdout=proc.stdout,
             stderr=proc.stderr,
             returncode=proc.returncode,
@@ -2732,24 +2364,9 @@ Output contract:
         _AGGREGATE_REQUEST_MAX_CHARS = 500
         if len(request) > _AGGREGATE_REQUEST_MAX_CHARS:
             request = request[:_AGGREGATE_REQUEST_MAX_CHARS] + f"\n... [truncated {len(request)} chars]"
-        # Surface the Leader-selected package + Skill collection so the
-        # aggregator has the full context when writing the final report.
-        meta = self.store.get_run_meta(run_id) or {}
-        package_name = meta.get("package")
-        package_skills = list(meta.get("package_skills") or [])
-        package_block = ""
-        if package_name or package_skills:
-            skills_line = ", ".join(package_skills) if package_skills else "(no skills recorded)"
-            package_block = (
-                f"\n\nLeader-selected scenario:\n"
-                f"- Package: {package_name or '(none)'}\n"
-                f"- Triggered Skill collection: {skills_line}\n"
-                f"When writing the final answer, mention the scenario bundle that was used so the operator can see which Skill set Leader activated.\n"
-            )
         node.description = (
             f"Original request:\n{request}\n\nWorker results:\n{report}\n\n"
             f"Produce final concise report. Mention timeouts and shard coverage honestly."
-            f"{package_block}"
             f"\n\nWhen generating your HERMES-COLLAB-RESULT JSON, include ALL files_modified from the upstream workers listed above."
             f" Use paths relative to the project root."
         )
@@ -2898,83 +2515,111 @@ Output contract:
             except Exception as exc:
                 _log.warning("[EventLoop] Failed to update node %s on leader_replied: %s", node_id, exc)
 
+        elif event_type == "guardian:stream":
+            # Worker output — log to DB
+            if run_id:
+                try:
+                    self.store.log(run_id, "info", detail[:500], {"node_id": node_id, "type": "stream"})
+                except Exception:
+                    pass
+            _log.info("[EventLoop] [%s] %s", node_id, detail[:200])
+
+        elif event_type == "guardian:completed":
+            dur = event.get("duration", "")
+            _log.info("[EventLoop] Node %s completed (%ss)", node_id, dur)
+
+        elif event_type == "guardian:worker_error":
+            error = event.get("error", detail)
+            _log.warning("[EventLoop] Node %s failed: %s", node_id, error[:200])
+
+        elif event_type == "guardian:need_input":
+            _log.info("[EventLoop] Node %s needs input: %s", node_id, detail[:200])
+
         else:
-            _log.debug("[EventLoop] Unhandled event type: %s", event_type)
+            _log.debug("[EventLoop] Unhandled event type: %s (detail: %s)", event_type, detail[:80])
 
-    def _wait_leader_reply(self, node_id: str, run_id: str) -> None:
-        """Background thread: read leader stdout after a need_input was forwarded.
+    def _leader_review(self, run_id: str, request: str, plan: Any, results: list) -> str | None:
+        """Use LLM to review each node's output against task requirements.
 
-        Waits up to 120 seconds for the leader to produce output on its stdout.
-        After 3 seconds of silence the reply is considered complete, and a
-        ``leader_replied`` event is pushed onto the event queue.
-
-        If the leader process dies during the wait, falls back immediately.
+        Builds a structured prompt with task_requirements + node results,
+        calls the agent LLM, and returns the review as markdown text.
+        Returns None on any failure (caller falls back to simple summary).
         """
-        import logging as _logging
-        import select as _sel
+        import subprocess as _sp, json as _json
+        reqs = plan.task_requirements or []
+        if not reqs or not results:
+            return None
 
-        _log = _logging.getLogger(__name__)
-        _leader = self._leader_session
-        if not _leader or not _leader.get("stdout"):
-            _log.warning("[LeaderReply] No leader stdout for node %s, falling back to running", node_id)
-            self.store.update_node(node_id, "running", run_id=run_id)
-            return
+        # Build node result summary (no raw stdout)
+        _node_lines = []
+        for _r in results:
+            _status = "通过" if _r.ok else "失败"
+            # Extract key info from result_struct if available
+            _files = ""
+            _summary = ""
+            if _r.result_struct:
+                _files = ", ".join(_r.result_struct.get("files_modified", []))
+                _summary = _r.result_struct.get("summary", "")
+            _node_lines.append(
+                f"### {_r.node_id}\n"
+                f"- 状态: {_status}\n"
+                f"- 耗时: {_r.duration_seconds}s\n"
+                f"- 关键产出: {_summary}\n"
+                f"- 涉及文件: {_files}\n"
+            )
 
-        _sfd = _leader["stdout"]
-        _proc = _leader.get("proc")
-        try:
-            _fd = _sfd.fileno()
-        except Exception:
-            _log.warning("[LeaderReply] Leader stdout fd unavailable for node %s, falling back", node_id)
-            self.store.update_node(node_id, "running", run_id=run_id)
-            return
+        _nodes_text = "\n".join(_node_lines)
 
-        _lines = []
-        _deadline = time.time() + 120  # max wait for leader reply
-        _idle_limit = 3.0  # seconds of silence = reply complete
+        # Build requirement table
+        _req_lines = []
+        for _req in reqs:
+            _req_lines.append(f"- {_req['id']}: {_req['description']} (节点: {_req['node_id']})")
+        _reqs_text = "\n".join(_req_lines)
 
-        while time.time() < _deadline:
-            # ── Check leader health ──
-            if _proc is not None and _proc.poll() is not None:
-                _log.warning(
-                    "[LeaderReply] leader died while waiting for reply on node %s (rc=%s), falling back",
-                    node_id,
-                    _proc.returncode,
-                )
-                self.store.update_node(node_id, "running", run_id=run_id)
-                return
+        prompt = (
+            f"你是 Hermes 协作引擎的 Leader Agent，负责对 WBS 节点执行结果进行审查并输出报告。\n\n"
+            f"## 原始任务\n{request}\n\n"
+            f"## 任务要求逐项对照\n{_reqs_text}\n\n"
+            f"## 节点执行结果\n{_nodes_text}\n\n"
+            f"## 审查要求\n"
+            f"1. 逐项检查每个 requirement 是否被满足：✅ 完全满足 / ⚠️ 部分满足 / ❌ 未满足\n"
+            f"2. 对每个节点评估执行效果、代码质量、验证充分性\n"
+            f"3. 整体判断交付物是否达成原始任务目标\n\n"
+            f"## 输出格式\n"
+            f"以全中文 Markdown 输出，不要用代码块包裹。结构如下：\n\n"
+            f"# Leader 审查报告 · {run_id[:12]}...\n\n"
+            f"## 任务对照\n"
+            f"- 原始任务: {request[:100]}...\n"
+            f"逐项说明...\n\n"
+            f"## 节点审查\n"
+            f"各节点评估...\n\n"
+            f"## 整体评估\n"
+            f"综合评价...\n"
+        )
 
-            try:
-                _r, _, _ = _sel.select([_fd], [], [], _idle_limit)
-                if _r:
-                    _line = _sfd.readline()
-                    if not _line:
-                        break
-                    # Skip prompt lines that hermes may echo
-                    stripped = _line.strip()
-                    if stripped in ("> ", ">", "") or stripped.startswith("> "):
-                        continue
-                    _lines.append(_line)
-                else:
-                    # Idle timeout — response is complete
-                    break
-            except Exception:
-                break
+        # Call LLM via agent_backend
+        _review_model = self.leader_model or self.worker_model
+        # If no model configured, use auto_prefix with a default
+        if not _review_model and self.agent_backend.auto_prefix:
+            _review_model = f"{self.agent_backend.auto_prefix}deepseek-v4-flash"
+        cmd = self.agent_backend.build_command(
+            prompt=prompt, model=_review_model,
+            allowed_tools=[], provider=None, reasoning=False,
+        )
+        proc = _sp.run(cmd, cwd=str(self.cwd), text=True,
+                       stdin=_sp.DEVNULL, stdout=_sp.PIPE, stderr=_sp.PIPE,
+                       timeout=60)
+        if proc.returncode != 0:
+            return None
 
-        if _lines:
-            _reply = "".join(_lines).strip()
-            _log.info("[LeaderReply] Leader replied for node %s (%d chars)", node_id, len(_reply))
-            self._leader_replies[(run_id, node_id)] = _reply
-            self._event_queue.put({
-                "type": "leader_replied",
-                "node_id": node_id,
-                "run_id": run_id,
-                "detail": _reply[:200],
-                "timestamp": time.time(),
-            })
-        else:
-            _log.warning("[LeaderReply] No leader reply for node %s within deadline, falling back", node_id)
-            self.store.update_node(node_id, "running", run_id=run_id)
+        # Extract markdown from LLM output
+        text = (proc.stdout or "").strip()
+        # Strip code fences if LLM wrapped output
+        import re as _re
+        _m = _re.search(r"```(?:markdown)?\s*([\s\S]*?)```", text)
+        if _m:
+            text = _m.group(1).strip()
+        return text if len(text) > 50 else None
 
     def _start_leader_session(self, run_id: str) -> bool:
         """Start a persistent leader session via ``hermes chat -z --resume dt-leader-{run_id}``.
@@ -3143,218 +2788,6 @@ Output contract:
                 # Attempt restart (increments _leader_restart_count inside)
                 self._start_leader_session(run_id)
 
-    def _run_direct(self, run_id: str, request: str, score, package: str | None, session_id: str | None, timeout: int) -> dict:
-        """Direct mode: leader answers immediately, no workers/WBS/aggregate.
-
-        For ``routing == "direct"``, the leader (hermes) responds directly.
-        This avoids spawning any opencode worker subprocess, creating WBS
-        nodes, or running the aggregate summarization step.
-        """
-        self._direct_mode = True
-        self.store.log(run_id, "info", "direct mode: leader answering directly")
-
-        started = time.time()
-        ok = False
-        stdout = ""
-        stderr = ""
-
-        # --- Try leader persistent session first ---
-        _leader = self._leader_session
-        _used_leader = False
-        if _leader is not None and _leader.get("proc") is not None and _leader["proc"].poll() is None:
-            try:
-                _msg = f"用户问题: {request}\n\n请直接回答:"
-                _leader["stdin"].write(_msg + "\n")
-                _leader["stdin"].flush()
-
-                import select as _sel
-                _sfd = _leader["stdout"]
-                _fd = _sfd.fileno()
-                _lines = []
-                _deadline = time.time() + min(timeout, 60)
-                _idle_limit = 2.0
-
-                while time.time() < _deadline:
-                    _r, _, _ = _sel.select([_fd], [], [], _idle_limit)
-                    if _r:
-                        _line = _sfd.readline()
-                        if not _line:
-                            break
-                        # Skip prompt lines that hermes may echo
-                        if _line.strip() in ("> ", ">", "") or _line.strip().startswith("> "):
-                            continue
-                        _lines.append(_line)
-                    else:
-                        # No more data — response complete
-                        break
-
-                _raw = "".join(_lines).strip()
-                # If we got a response, trim any trailing prompt artifacts
-                if _raw:
-                    stdout = _raw
-                    ok = True
-                    _used_leader = True
-            except Exception as _exc:
-                self.store.log(
-                    run_id, "warning",
-                    f"leader session read failed, falling back to one-shot: {_exc}",
-                )
-
-        # --- Fallback: one-shot Popen + communicate ---
-        if not _used_leader:
-            backend = self.leader_agent or self.agent_backend
-            # Verify backend binary exists
-            import shutil as _shutil
-            _binary = backend.command[0]
-            if _shutil.which(_binary) is None:
-                self.store.log(run_id, "error", f"no available agent binary found (tried '{_binary}'), returning fallback")
-                stdout = f"No available agent binary found. Tried: '{_binary}'. Please install the CLI tool."
-                ok = False
-            else:
-                # Build session context from past turns for conversational continuity
-                _session_ctx = ""
-                if session_id:
-                    _past_turns = self.store.get_session_turns(session_id, limit=5)
-                    if _past_turns:
-                        _turn_lines = []
-                        for _t in _past_turns:
-                            _req = str(_t.get("user_request", ""))[:200]
-                            _agg = str(_t.get("aggregate", ""))[:200]
-                            _turn_lines.append(f"  用户：{_req}")
-                            if _agg:
-                                _turn_lines.append(f"  回答：{_agg}")
-                        if _turn_lines:
-                            _session_ctx = "历史对话：\n" + "\n".join(_turn_lines) + "\n\n"
-                _prompt = (
-                    f"{backend.prompt_prefix}\n\n"
-                    f"你是一个智能助手，请直接回答用户的问题。\n\n"
-                    f"{_session_ctx}"
-                    f"用户问题: {request}\n\n"
-                    f"回答:"
-                )
-                cmd = backend.build_command(
-                    prompt=_prompt, model=self.leader_model,
-                    allowed_tools=[], provider=self.provider, reasoning=False,
-                )
-                import subprocess as _sp
-                try:
-                    if getattr(backend, 'needs_pty', False):
-                        # PTY mode for agents like codex that require a terminal
-                        import pty as _pty, os as _os, errno as _errno
-                        _master, _slave = _pty.openpty()
-                        proc = _sp.Popen(cmd, stdout=_slave, stderr=_slave,
-                                         stdin=_slave, close_fds=True, cwd=self.cwd)
-                        _os.close(_slave)
-                        _stdout_bytes = b""
-                        import select as _sel
-                        _deadline = time.time() + min(timeout, 60)
-                        while time.time() < _deadline and proc.poll() is None:
-                            _r, _, _ = _sel.select([_master], [], [], 0.5)
-                            if _r:
-                                try:
-                                    _data = _os.read(_master, 4096)
-                                    if not _data:
-                                        break
-                                    _stdout_bytes += _data
-                                except OSError as _ioe:
-                                    if _ioe.errno == _errno.EIO:
-                                        break  # PTY closed
-                                    raise
-                        _os.close(_master)
-                        proc.wait(timeout=5)
-                        _stdout = _stdout_bytes.decode("utf-8", errors="replace")
-                        # Strip codex startup banner
-                        if getattr(backend, 'needs_pty', False):
-                            _lines = _stdout.split("\n")
-                            _clean_lines = []
-                            _in_banner = True
-                            for _l in _lines:
-                                if _in_banner:
-                                    if _l.strip() == "--------" or _l.strip().startswith("workdir:"):
-                                        continue
-                                    if "OpenAI Codex" in _l or "stdin" in _l:
-                                        continue
-                                    if _l.strip() == "":
-                                        continue
-                                    _in_banner = False
-                                _clean_lines.append(_l)
-                            _stdout = "\n".join(_clean_lines).strip()
-                        stdout = _stdout.strip()
-                        stderr = ""
-                        ok = proc.returncode == 0
-                    else:
-                        proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE,
-                                         text=True, cwd=self.cwd)
-                        _stdout, _stderr = proc.communicate(timeout=min(timeout, 60))
-                        stdout = _stdout.strip()
-                        stderr = _stderr.strip() if _stderr else ""
-                        ok = proc.returncode == 0
-                except _sp.TimeoutExpired:
-                    proc.kill()
-                    _stdout, _stderr = proc.communicate(timeout=5)
-                    ok = False
-                    stdout = (_stdout or "") + "\n[timeout]"
-                    stderr = _stderr.strip() if _stderr else ""
-                except FileNotFoundError:
-                    ok = False
-                    # Distinguish between binary not found and cwd not found
-                    import shutil as _shutil2
-                    if _shutil2.which(backend.command[0]) is None:
-                        stdout = f"leader agent not found: {backend.command[0]}"
-                    elif not os.path.isdir(self.cwd):
-                        stdout = f"cwd does not exist: {self.cwd}"
-                    else:
-                        stdout = f"failed to spawn {backend.command[0]} (unknown FileNotFoundError)"
-                    stderr = ""
-
-        duration = time.time() - started
-        result_text = stdout.strip()
-
-        # Save result and finalize run
-        self.store.update_run(run_id, "completed" if ok else "failed")
-        self.store.log(run_id, "info" if ok else "error",
-                       "direct answer completed",
-                       {"ok": ok, "duration": round(duration, 1)})
-
-        # Insert a minimal WBS node so frontend _reconstructFromRun can find the result.
-        self.store.insert_wbs_node(run_id, {
-            "id": "direct-answer",
-            "title": "Direct answer",
-            "description": request,
-            "capability": "general",
-            "complexity": score.overall,
-            "dependencies": [],
-            "parallelizable": True,
-            "deliverable": "Direct answer",
-            "status": "completed" if ok else "failed",
-            "attempt": 1,
-            "checkpoint": False,
-        })
-        self.store.update_node_result(run_id, "direct-answer", result_text)
-
-        self.store.log(run_id, "info" if ok else "error",
-                       "run finished", {"ok": ok})
-
-        if session_id:
-            self.store.add_session_turn(session_id, run_id, request, result_text)
-
-        # Build WorkerResult-like dict for return
-        return {
-            "run_id": run_id,
-            "ok": ok,
-            "complexity": score.to_dict(),
-            "results": [],
-            "aggregate": {
-                "ok": ok,
-                "result": result_text,
-                "node_id": "direct-answer",
-                "duration_seconds": round(duration, 1),
-                "returncode": 0,
-                "stderr": stderr.strip() if stderr else "",
-            } if result_text else None,
-            "lessons_learned": [],
-        }
-
     # ------------------------------------------------------------------
     # v3: Checkpoint, risk detection, pause/resume, redo-node
     # ------------------------------------------------------------------
@@ -3392,11 +2825,6 @@ Output contract:
                 else:
                     risks.append(("medium", f"Node {node.id} reports blocking issues: {blocking}"))
             files = result_struct.get("files_modified") or result_struct.get("files_touched") or []
-            if self._file_allowlist and files:
-                for f in files:
-                    fpath = f.get("path", f) if isinstance(f, dict) else f
-                    if fpath not in self._file_allowlist:
-                        risks.append(("medium", f"Node {node.id} touched non-allowlist file: {fpath}"))
         if node.checkpoint:
             risks.append(("high", f"Checkpoint node {node.id} ({node.title}) completed"))
         return risks

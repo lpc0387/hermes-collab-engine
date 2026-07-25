@@ -78,7 +78,6 @@ def append_entry(title: str, body: str, *, path: Path = MEMORY_FILE) -> dict:
         if score > best_score:
             best_score = score
             best_idx = i
-    created = not path.exists()
     if best_score >= overlap_threshold:
         # Mark the existing entry as reinforced, don't duplicate.
         # Rewrite the file by joining current entries with §, then

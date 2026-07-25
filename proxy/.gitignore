@@ -1,0 +1,9 @@
+opencode-proxy
+opencode-proxy.exe
+opencode-proxy-api-linux-*
+opencode-proxy-api-darwin-*
+opencode-proxy-api-windows-*
+/dist/
+.env
+node_modules/
+*.tmp

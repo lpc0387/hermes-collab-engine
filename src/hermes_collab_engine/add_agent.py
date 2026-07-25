@@ -7,6 +7,7 @@ import ssl
 import sys
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 RUNTIME_CONFIG_PATH = ROOT / '.runtime-config.json'
@@ -82,10 +83,14 @@ def _call_llm(prompt: str, api_key: str, base_url: str, model: str) -> str:
 
     url = base_url.rstrip('/')
     if not url.endswith('/chat/completions'):
-        if '/v1' not in url:
-            url += '/v1/chat/completions'
+        parsed = urlparse(url)
+        path = parsed.path.rstrip('/')
+        if '/v1' not in path:
+            path += '/v1/chat/completions'
         else:
-            url += '/chat/completions'
+            path += '/chat/completions'
+        parsed = parsed._replace(path=path)
+        url = urlunparse(parsed)
 
     ctx = ssl.create_default_context()
     req = urllib.request.Request(url, data=body, headers=headers, method='POST')
@@ -202,13 +207,6 @@ def _available_package_managers() -> dict[str, str]:
         'brew': 'brew install {pkg}',
     }
     return {k: v for k, v in mgrs.items() if _find_cli(k)}
-
-
-def _find_insert_point(lines: list[str], marker: str) -> int:
-    for i, line in enumerate(lines):
-        if marker in line:
-            return i
-    return -1
 
 
 def _make_backend_entry(config: dict) -> str:
@@ -335,11 +333,16 @@ def add_agent(agent_name: str, user_hint: str = '', auto_apply: bool = False) ->
             if not install_attempts:
                 for pm, template in available_pms.items():
                     install_attempts.append(template.format(pkg=cli_cmd))
+            import subprocess as _sp
+            _ALLOWED_PREFIXES = ("npm install", "pip install", "pip3 install", "go install", "cargo install", "brew install")
             for ic in install_attempts:
                 pm_name = ic.split()[0]
                 if pm_name in available_pms or pm_name not in ('npm', 'pip', 'pip3', 'go', 'cargo', 'brew'):
+                    if not ic.startswith(_ALLOWED_PREFIXES):
+                        print(f'  ⛔ blocked (not in whitelist): {ic}')
+                        continue
                     print(f'  正在运行: {ic}')
-                    ret = os.system(ic)
+                    ret = _sp.run(ic, shell=True, check=False).returncode
                     if ret == 0 and _find_cli(cli_cmd):
                         print(f'  ✓ {cli_cmd} 已安装')
                         break

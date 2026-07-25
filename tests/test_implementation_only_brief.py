@@ -4,16 +4,26 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src.hermes_collab_engine.engine import CollabEngine
 from src.hermes_collab_engine.models import Plan, WBSNode
 
 
-def _extract_prompt(call_args) -> str:
-    args, _kwargs = call_args
-    argv = args[0]
-    return argv[argv.index("-p") + 1]
+def _extract_prompt_from_cmd(cmd: list[str]) -> str:
+    """Find the prompt string in a subprocess command list.
+
+    opencode backend: prompt is positional arg (index 2 after ['opencode', 'run'])
+    For backends with -p flag, prompt follows the flag.
+    """
+    for idx, token in enumerate(cmd):
+        if token == "-p" and idx + 1 < len(cmd):
+            return cmd[idx + 1]
+    # Fallback: opencode-style positional prompt
+    if len(cmd) >= 3 and cmd[0] == "opencode" and cmd[1] == "run":
+        return cmd[2]
+    # Last resort: longest string arg is the prompt
+    return max((a for a in cmd if isinstance(a, str)), key=len)
 
 
 class ImplementationOnlyBriefTests(unittest.TestCase):
@@ -60,32 +70,41 @@ class ImplementationOnlyBriefTests(unittest.TestCase):
         )
 
     def _prompt_for(self, node: WBSNode) -> str:
-        completed = subprocess.CompletedProcess(
-            args=["claude"],
-            returncode=0,
-            stdout='{"result":"ok","session_id":"s1","is_error":false}',
-            stderr="",
-        )
-        with patch("src.hermes_collab_engine.engine.subprocess.run", return_value=completed) as mock_run:
+        """Run _run_worker with a mocked subprocess.Popen and extract the prompt."""
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        mock_proc.poll.return_value = 0          # process already exited
+        mock_proc.returncode = 0
+        mock_proc.stdout = MagicMock()
+        mock_proc.stdout.readline.side_effect = [""]
+        mock_proc.stderr = MagicMock()
+        mock_proc.stderr.readline.side_effect = [""]
+        mock_proc.communicate.return_value = ("", "")
+
+        with patch(
+            "src.hermes_collab_engine.engine.subprocess.Popen",
+            return_value=mock_proc,
+        ) as mock_popen:
             self.engine._run_worker("run_test", node, timeout=30)
-            return _extract_prompt(mock_run.call_args)
+            self.assertTrue(mock_popen.called, "subprocess.Popen was not invoked")
+            cmd_list = mock_popen.call_args[0][0]
+            return _extract_prompt_from_cmd(cmd_list)
 
     def test_shared_brief_is_in_implementation_prompt(self) -> None:
         prompt = self._prompt_for(self.implementation)
 
-        self.assertIn("Shared brief:\nshared implementation context", prompt)
+        self.assertIn("Completed work summary (upstream workers):\nshared implementation context", prompt)
         self.assertIn("Brief:\nimplementation-only", prompt)
 
     def test_shared_brief_is_not_in_analysis_prompt(self) -> None:
         prompt = self._prompt_for(self.analysis)
 
-        self.assertNotIn("Shared brief:\nshared implementation context", prompt)
+        self.assertNotIn("Completed work summary (upstream workers):\nshared implementation context", prompt)
         self.assertIn("Brief:\nanalysis-only", prompt)
 
     def test_shared_brief_is_not_in_verification_prompt(self) -> None:
         prompt = self._prompt_for(self.verification)
 
-        self.assertNotIn("Shared brief:\nshared implementation context", prompt)
+        self.assertNotIn("Completed work summary (upstream workers):\nshared implementation context", prompt)
         self.assertIn("Brief:\nverification-only", prompt)
 
 

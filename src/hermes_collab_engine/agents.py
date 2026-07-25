@@ -67,6 +67,7 @@ class AgentBackend:
     reasoning_env: dict[str, str] = field(default_factory=dict)  # Env vars for max reasoning
     needs_pty: bool = False  # True if agent requires a pseudo-terminal
     supported_tools: list[str] = field(default_factory=list)   # tool/MCP profile names this agent can use; empty = all
+    supported_skills: list[str] = field(default_factory=list)  # skill names this agent can use; empty = all
     supported_skill_slots: list[str] = field(default_factory=lambda: [
         "implementation-focus", "test-verify", "search-verify",
         "debug-root-cause", "risk-checkpoint", "browser-automation",
@@ -278,7 +279,7 @@ _register_builtin(AgentBackend(
     display_name="Claude Code",
     command=["claude"],
     prompt_flag="-p",
-    output_format_flags=["--output-format", "json"],
+    output_format_flags=[],
     supports_model_flag=True,
     model_flag="--model",
     permission_flags=["--permission-mode", "auto"],
@@ -292,12 +293,42 @@ _register_builtin(AgentBackend(
     reasoning_flags=[],
     reasoning_env={"ANTHROPIC_THINKING_BUDGET": "32000"},
 ))
+# 为 claude-code backend 注入持久会话能力
+_c = _BUILTINS["claude-code"]
+_c._supports_sessions = True
+
+def _claude_create_session(prompt: str, **kw) -> SessionHandle:
+    import subprocess as _sp
+    import uuid
+    sid = kw.get("session_id", "worker-" + uuid.uuid4().hex[:8])
+    quiet = kw.get("quiet", True)
+    cmd = ["claude", "--resume", sid, "-p", prompt]
+    if quiet:
+        cmd.append("--quiet")
+    proc = _sp.Popen(
+        cmd,
+        stdin=_sp.DEVNULL, stdout=_sp.PIPE, stderr=_sp.PIPE,
+        text=True, bufsize=1,
+    )
+    return SessionHandle(session_id=sid, proc=proc, stdout=proc.stdout,
+                         meta={"type": "claude"})
+
+_c.create_session = _claude_create_session
+
+def _claude_session_send(handle: SessionHandle, message: str) -> None:
+    import subprocess as _sp
+    if handle.session_id:
+        cmd = ["claude", "--resume", handle.session_id, "-p", message, "--quiet"]
+        _sp.Popen(cmd, stdin=_sp.DEVNULL, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+
+_c.session_send = _claude_session_send
+
 _register_builtin(AgentBackend(
     name="codex",
     display_name="Codex CLI",
     command=["codex", "exec"],
     prompt_flag="",  # codex takes prompt as positional arg
-    output_format_flags=["--skip-git-repo-check"],
+    output_format_flags=["--skip-git-repo-check", "--sandbox", "workspace-write"],
     supports_model_flag=True,
     model_flag="--model",
     permission_flags=None,
@@ -327,7 +358,7 @@ _register_builtin(AgentBackend(
     prompt_prefix="You are an OpenCode worker in a Hermes collaboration engine.",
     prompt_suffix="",
     default_allowed_tools=[],
-    capabilities=["file-edit", "git-ops"],
+    capabilities=["file-edit", "git-ops", "test-run", "mcp-host", "search"],
     reasoning_flags=["--variant", "max"],
     reasoning_env={},
     auto_prefix="opencode-go/",
@@ -354,8 +385,10 @@ def _opencode_create_session(prompt: str, **kw) -> SessionHandle:
         stdin=_sp.DEVNULL, stdout=_stdout, stderr=_stderr,
         text=True,
     )
-    if not stdout_path:
-        _stdout.close() if hasattr(_stdout, 'close') else None
+    if stdout_path:
+        _stdout.close()
+    if stderr_path:
+        _stderr.close()
     return SessionHandle(session_id=sid, proc=proc, meta={"type": "opencode", "model": model or "", "_pending_sid": True})
 
 _o.create_session = _opencode_create_session
@@ -375,9 +408,18 @@ def _opencode_ensure_session_id(handle: SessionHandle) -> str:
             if isinstance(sessions, list) and sessions:
                 handle.session_id = sessions[-1].get("id", handle.session_id)
     except Exception:
-        pass
+        import logging as _log
+        _log.getLogger(__name__).warning("opencode session list failed", exc_info=True)
     handle.meta["_pending_sid"] = False
     return handle.session_id
+
+def _opencode_session_close(handle: SessionHandle) -> None:
+    import subprocess as _sp
+    for _proc in handle.meta.get("_pending_sends", []):
+        if _proc.poll() is None:
+            _proc.kill()
+    if handle.proc and handle.proc.poll() is None:
+        handle.proc.kill()
 
 def _opencode_session_send(handle: SessionHandle, message: str) -> None:
     import subprocess as _sp
@@ -386,14 +428,17 @@ def _opencode_session_send(handle: SessionHandle, message: str) -> None:
     model = handle.meta.get("model", "")
     if model:
         cmd.extend(["--model", model])
-    _sp.Popen(cmd, stdin=_sp.DEVNULL, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    _proc = _sp.Popen(cmd, stdin=_sp.DEVNULL, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    _pending = handle.meta.setdefault("_pending_sends", [])
+    _pending.append(_proc)
 
 _o.session_send = _opencode_session_send
+_o.close_session = _opencode_session_close
 
 _register_builtin(AgentBackend(
     name="hermes",
     display_name="Hermes Agent",
-    command=["hermes", "--provider", "opencode-go"],
+    command=["hermes"],
     prompt_flag="-z",
     output_format_flags=[],
     supports_model_flag=True,
@@ -405,7 +450,7 @@ _register_builtin(AgentBackend(
     prompt_prefix="You are Hermes, the orchestration agent in a collaboration engine.",
     prompt_suffix="",
     default_allowed_tools=[],
-    capabilities=["planning", "analysis", "orchestration", "delegation", "file-edit", "git-ops", "search"],
+    capabilities=["planning", "analysis", "orchestration", "file-edit", "git-ops", "search"],
     reasoning_flags=[],
     reasoning_env={"HERMES_REASONING_EFFORT": "high"},
 ))
@@ -426,6 +471,19 @@ def _hermes_create_session(prompt: str, **kw) -> SessionHandle:
         stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE,
         text=True, bufsize=1,
     )
+    # Drain initial banner (2s window) — filter non-response lines
+    import time as _time, select as _sel
+    _deadline = _time.time() + 2
+    while _time.time() < _deadline:
+        _r, _, _ = _sel.select([proc.stdout], [], [], 0.2)
+        if _r:
+            _line = proc.stdout.readline()
+            if any(_s in _line for _s in ["> ", "Tip:", "Welcome", "Warning"]):
+                continue
+            # Got real response, no need to send prompt again
+            break
+        else:
+            break
     # 发送初始 prompt
     if proc.stdin:
         proc.stdin.write(prompt + "\n")
@@ -443,67 +501,7 @@ def _hermes_session_send(handle: SessionHandle, message: str) -> None:
 _h.session_send = _hermes_session_send
 
 
-_register_builtin(AgentBackend(
-    name="windsurf",
-    display_name="Windsurf",
-    command=["windsurf"],
-    prompt_flag="-p",
-    output_format_flags=[],
-    supports_model_flag=True,
-    model_flag="--model",
-    permission_flags=None,
-    allowed_tools_flag=None,
-    output_parser="raw_text",
-    process_pattern="windsurf",
-    prompt_prefix="You are a Windsurf worker in a Hermes collaboration engine.",
-    prompt_suffix="",
-    default_allowed_tools=[],
-    capabilities=["file-edit", "search", "git-ops"],
-    reasoning_flags=[],
-    reasoning_env={},
-))
 
-
-_register_builtin(AgentBackend(
-    name="copilot",
-    display_name="GitHub Copilot",
-    command=["copilot"],
-    prompt_flag="--prompt",
-    output_format_flags=[],
-    supports_model_flag=True,
-    model_flag="--model",
-    permission_flags=None,
-    allowed_tools_flag=None,
-    output_parser="raw_text",
-    process_pattern="copilot",
-    prompt_prefix="You are a GitHub Copilot worker in a Hermes collaboration engine.",
-    prompt_suffix="",
-    default_allowed_tools=[],
-    capabilities=["file-edit", "search", "git-ops", "test-run"],
-    reasoning_flags=[],
-    reasoning_env={},
-))
-
-
-_register_builtin(AgentBackend(
-    name="openclaw",
-    display_name="OpenClaw",
-    command=["openclaw"],
-    prompt_flag="--prompt",
-    output_format_flags=[],
-    supports_model_flag=True,
-    model_flag="--model",
-    permission_flags=None,
-    allowed_tools_flag=None,
-    output_parser="raw_text",
-    process_pattern="openclaw",
-    prompt_prefix="You are a OpenClaw worker in a Hermes collaboration engine.",
-    prompt_suffix="",
-    default_allowed_tools=[],
-    capabilities=["file-edit", "search", "git-ops", "test-run"],
-    reasoning_flags=[],
-    reasoning_env={},
-))
 
 
 def list_backends() -> list[AgentBackend]:
@@ -515,7 +513,14 @@ def get_backend(name: str) -> AgentBackend:
     """Get a backend by name. Raises KeyError if not found."""
     if name not in _BUILTINS:
         raise KeyError(f"Unknown agent backend: {name!r}. Available: {sorted(_BUILTINS.keys())}")
-    return _BUILTINS[name]
+    backend = _BUILTINS[name]
+    if not backend.is_available():
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            f"Agent backend {name!r} is not available (command not on PATH)"
+        )
+        return _BUILTINS.get("opencode", backend)
+    return backend
 
 
 def detect_available_backends() -> list[AgentBackend]:
@@ -523,19 +528,22 @@ def detect_available_backends() -> list[AgentBackend]:
     return [b for b in _BUILTINS.values() if b.is_available()]
 
 
-def backends_for_capability(capability: str) -> list[AgentBackend]:
-    """Return backends that declare the given capability."""
-    return [b for b in _BUILTINS.values() if capability in b.capabilities]
-
-
 def register_backend(backend: AgentBackend) -> None:
     """Register a custom backend at runtime (or override a built-in)."""
     _BUILTINS[backend.name] = backend
 
 
+def backends_for_capability(capability: str) -> list[AgentBackend]:
+    """Return backends that advertise support for the given capability."""
+    return [b for b in _BUILTINS.values() if capability in b.capabilities]
+
+
 def delete_backend(name: str) -> bool:
-    """Remove a registered backend by name. Returns True if removed, False if not found."""
-    if name in _BUILTINS:
-        del _BUILTINS[name]
-        return True
-    return False
+    """Remove a backend by name (only non-built-in)."""
+    if name not in _BUILTINS:
+        return False
+    del _BUILTINS[name]
+    return True
+
+
+

@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .engine import CollabEngine
 from .store import CollabStore
+from .registry import SkillEntry, ToolEntry
 
 INDEX_HTML = Path(__file__).resolve().parents[2] / "web" / "index.html"
 
@@ -38,24 +39,29 @@ class DashboardServer:
         }
 
     def skills_payload(self, node_type: str = "", task: str = "") -> list[dict]:
-        from .skills import get_default_registry
-        registry = get_default_registry()
-        skills = registry.select_for_node(node_type, task) if node_type else registry.list_all()
+        from .registry import get_unified_registry
+        registry = get_unified_registry()
+        skills = registry.select_skills(node_type, task) if node_type else registry.list_by_type(SkillEntry)
         return [skill.to_dict() for skill in skills]
 
     def tools_payload(self, node_type: str = "", task: str = "") -> list[dict]:
-        from .tools import get_default_tool_registry
-        registry = get_default_tool_registry()
-        profiles = registry.select_for_node(node_type, task) if node_type else registry.list_all()
+        from .registry import get_unified_registry
+        registry = get_unified_registry()
+        profiles = registry.select_tools(node_type, task) if node_type else registry.list_by_type(ToolEntry)
         return [profile.to_dict() for profile in profiles]
 
     def serve(self) -> None:
         outer = self
-        # Initialize unified registry with store for persistence
+        # Initialize unified registry
         from .registry import get_unified_registry
-        get_unified_registry(store=outer.store)
+        get_unified_registry()
 
         class Handler(BaseHTTPRequestHandler):
+            # Track active SSE connections for rate limiting
+            _sse_connections = 0
+            _SSE_MAX_CONNECTIONS = 20
+            _sse_lock = threading.Lock()
+
             def _json(self, data, status=200):
                 body = json.dumps(data, ensure_ascii=False, indent=2).encode()
                 self.send_response(status)
@@ -126,11 +132,14 @@ class DashboardServer:
                     tools = [e.to_dict() for e in entries if e.__class__.__name__ == "ToolEntry"]
                     mcp = [e.to_dict() for e in entries if e.__class__.__name__ == "MCPEntry"]
                     self._json({"skills": skills, "tools": tools, "mcp": mcp, "total": len(entries)})
-                elif path.startswith("/api/runs/"):
-                    run_id = path.split("/")[3]
-                    detail = outer.store.run_detail(run_id, full=True)
-                    self._json(detail)
                 elif path == "/api/events":
+                    with Handler._sse_lock:
+                        if Handler._sse_connections >= Handler._SSE_MAX_CONNECTIONS:
+                            self._json({"error": "too many SSE connections"}, 429)
+                            return
+                        Handler._sse_connections += 1
+                    import logging as _log
+                    _log.getLogger(__name__).info("SSE connection #%d accepted", Handler._sse_connections)
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-cache")
@@ -138,13 +147,19 @@ class DashboardServer:
                     self.end_headers()
                     try:
                         import time
-                        while True:
+                        _deadline = time.time() + 3600  # max 1 hour per connection
+                        while time.time() < _deadline:
                             payload = json.dumps({"overview": outer.store.overview(), "logs": outer.store.recent_logs(20)}, ensure_ascii=False)
                             self.wfile.write(f"data: {payload}\n\n".encode())
                             self.wfile.flush()
                             time.sleep(2)
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                        _log.getLogger(__name__).info("SSE client disconnected")
                     except Exception:
-                        pass
+                        _log.getLogger(__name__).warning("SSE error", exc_info=True)
+                    finally:
+                        with Handler._sse_lock:
+                            Handler._sse_connections -= 1
                 else:
                     self._json({"error": "not found"}, 404)
 
@@ -419,4 +434,12 @@ class DashboardServer:
 
         httpd = ThreadingHTTPServer((self.host, self.port), Handler)
         print(f"Hermes Collab Engine dashboard: http://{self.host}:{self.port}")
+
+        # Register daily distill (best-effort)
+        try:
+            from .distill.daily_distill import run as _run_dd
+            print("Distill module available — call via cli or cron")
+        except ImportError:
+            pass
+
         httpd.serve_forever()

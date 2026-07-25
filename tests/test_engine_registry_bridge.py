@@ -1,8 +1,7 @@
-"""Tests for the UnifiedRegistry → Engine bridge.
+"""Tests for the UnifiedRegistry -> Engine bridge via SkillDistributor.
 
-Verifies that web-added skills/tools in the UnifiedRegistry are picked up
-by the engine's _skills_for_worker and _tools_for_worker methods, while
-preserving backward compatibility with legacy registries.
+Verifies that skills/tools from the UnifiedRegistry are resolved correctly
+through the SkillDistributor for worker nodes.
 """
 from __future__ import annotations
 
@@ -18,6 +17,7 @@ from src.hermes_collab_engine.registry import (
     ToolEntry as UToolEntry,
     get_unified_registry,
 )
+from src.hermes_collab_engine.skill_distributor import SkillDistributor
 
 
 class TestEngineRegistryBridge(unittest.TestCase):
@@ -27,29 +27,24 @@ class TestEngineRegistryBridge(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         return CollabEngine(Path(tmp) / "db.sqlite3", tmp)
 
-    def _make_node(self, capability="implementation"):
-        return WBSNode(
-            id="wbs-test",
-            title="Test task",
-            description="Do something testable.",
-            capability=capability,
-            complexity=5,
-            dependencies=[],
-            parallelizable=True,
-            deliverable="Result",
-        )
+    def _distributor(self):
+        return SkillDistributor(unified_registry=get_unified_registry())
 
     def test_skills_for_worker_includes_builtin_skills(self):
         engine = self._make_engine()
-        node = self._make_node("implementation")
-        names, prompt = engine._skills_for_worker(node)
-        self.assertIn("implementation-focus", names)
-        self.assertIn("Relevant skills injected by Hermes:", prompt)
+        skill_names, tool_names = self._distributor().resolve_for_node(
+            node_capability="implementation",
+            leader_skills=None,
+            agent_backend=engine.agent_backend,
+        )
+        skills_block, _, _ = self._distributor().render_for_prompt(
+            skill_names, [], [],
+        )
+        self.assertIn("implementation-focus", skill_names)
+        self.assertIn("Relevant skills injected by Hermes:", skills_block)
 
     def test_skills_for_worker_includes_web_added_skill(self):
         engine = self._make_engine()
-        node = self._make_node("implementation")
-        # Register a web-added skill in the unified registry
         unified = get_unified_registry()
         web_skill = USkillEntry(
             name="web-custom-skill",
@@ -63,31 +58,39 @@ class TestEngineRegistryBridge(unittest.TestCase):
         )
         unified.register(web_skill)
         try:
-            names, prompt = engine._skills_for_worker(node)
-            self.assertIn("web-custom-skill", names)
-            self.assertIn("Custom instructions from web.", prompt)
+            skill_names, _ = self._distributor().resolve_for_node(
+                node_capability="implementation",
+                leader_skills=["implementation-focus", "web-custom-skill"],
+                agent_backend=engine.agent_backend,
+            )
+            skills_block, _, _ = self._distributor().render_for_prompt(
+                skill_names, [], [],
+            )
+            self.assertIn("web-custom-skill", skill_names)
+            self.assertIn("Custom instructions from web.", skills_block)
         finally:
             unified.delete("web-custom-skill")
 
-    def test_skills_for_worker_excludes_hermes_source_from_bridge(self):
-        """Built-in skills with source='hermes' should come from legacy registry only."""
+    def test_skills_for_worker_no_duplicates(self):
         engine = self._make_engine()
-        node = self._make_node("implementation")
-        # The built-in "implementation-focus" has source="hermes" in the unified registry
-        # It should still appear (from legacy), but not be duplicated
-        names, _ = engine._skills_for_worker(node)
-        self.assertEqual(names.count("implementation-focus"), 1)
+        skill_names, tool_names = self._distributor().resolve_for_node(
+            node_capability="implementation",
+            leader_skills=None,
+            agent_backend=engine.agent_backend,
+        )
+        self.assertEqual(len(skill_names), len(set(skill_names)))
 
     def test_tools_for_worker_includes_builtin_tools(self):
         engine = self._make_engine()
-        node = self._make_node("implementation")
-        names, allowed, prompt = engine._tools_for_worker(node)
-        self.assertIn("file-edit", names)
-        self.assertIn("Read", allowed)
+        skill_names, tool_names = self._distributor().resolve_for_node(
+            node_capability="implementation",
+            leader_skills=None,
+            agent_backend=engine.agent_backend,
+        )
+        self.assertIn("file-edit", tool_names)
 
     def test_tools_for_worker_includes_web_added_tool(self):
         engine = self._make_engine()
-        node = self._make_node("implementation")
         unified = get_unified_registry()
         web_tool = UToolEntry(
             name="web-custom-tool",
@@ -101,33 +104,33 @@ class TestEngineRegistryBridge(unittest.TestCase):
         )
         unified.register(web_tool)
         try:
-            names, allowed, prompt = engine._tools_for_worker(node)
-            self.assertIn("web-custom-tool", names)
-            self.assertIn("CustomTool1", allowed)
-            self.assertIn("CustomTool2", allowed)
+            _, tool_block, _ = self._distributor().render_for_prompt(
+                [], ["web-custom-tool"], [],
+            )
+            self.assertIn("Web Custom Tool", tool_block)
+            self.assertIn("CustomTool1", tool_block)
+            self.assertIn("CustomTool2", tool_block)
         finally:
             unified.delete("web-custom-tool")
 
     def test_tools_for_worker_no_duplicates(self):
-        """Legacy and unified entries with the same name should not duplicate."""
-        engine = self._make_engine()
-        node = self._make_node("implementation")
-        names, _, _ = engine._tools_for_worker(node)
-        # file-edit comes from both legacy and unified, should appear once
-        self.assertEqual(names.count("file-edit"), 1)
+        skill_names, tool_names = self._distributor().resolve_for_node(
+            node_capability="implementation",
+            leader_skills=None,
+            agent_backend=None,
+        )
+        self.assertEqual(len(tool_names), len(set(tool_names)))
 
     def test_backward_compat_empty_unified_registry(self):
-        """Engine should still work when unified registry has no web entries."""
         engine = self._make_engine()
-        node = self._make_node("implementation")
-        names, prompt = engine._skills_for_worker(node)
-        self.assertTrue(len(names) > 0)
-        self.assertTrue(len(prompt) > 0)
+        skill_names, tool_names = self._distributor().resolve_for_node(
+            node_capability="implementation",
+            leader_skills=None,
+            agent_backend=engine.agent_backend,
+        )
+        self.assertTrue(len(skill_names) > 0)
 
     def test_tools_for_worker_includes_web_added_mcp(self):
-        """MCP entries from UnifiedRegistry should flow into allowed tools."""
-        engine = self._make_engine()
-        node = self._make_node("implementation")
         unified = get_unified_registry()
         mcp = UMCPEntry(
             name="web-mcp-fs",
@@ -143,10 +146,12 @@ class TestEngineRegistryBridge(unittest.TestCase):
         )
         unified.register(mcp)
         try:
-            names, allowed, prompt = engine._tools_for_worker(node)
-            self.assertIn("web-mcp-fs", names)
-            self.assertIn("mcp__filesystem__read_file", allowed)
-            self.assertIn("mcp__filesystem__write_file", allowed)
+            _, tool_block, _ = self._distributor().render_for_prompt(
+                [], ["web-mcp-fs"], [],
+            )
+            self.assertIn("MCP Filesystem", tool_block)
+            self.assertIn("mcp__filesystem__read_file", tool_block)
+            self.assertIn("mcp__filesystem__write_file", tool_block)
         finally:
             unified.delete("web-mcp-fs")
 
