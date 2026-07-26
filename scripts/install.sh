@@ -51,6 +51,41 @@ JSON
   fi
 }
 
+seed_engine_rules() {
+  local skills_dir="$INSTALL_DIR/templates/hermes/skills"
+  local memories_dir="$INSTALL_DIR/templates/hermes/memories"
+
+  if [ -f "$skills_dir/leader-engine-discipline.yaml" ]; then
+    echo "  ✓ leader-engine-discipline.yaml 已存在"
+  else
+    cat > "$skills_dir/leader-engine-discipline.yaml" <<'YAML'
+name: leader-engine-discipline
+description: 我是 leader 不是 worker。必须走引擎调度。禁止越权自己改代码。
+version: 1.0.0
+rules:
+  - All code changes must go through hermes-collab run --agent hermes
+  - Do NOT add external timeout wraps around engine commands
+  - When engine fails: diagnose DB+logs first, repair engine, never bypass
+  - Role: dispatch tasks -> monitor workers -> verify quality. Not write code.
+YAML
+    echo "  ✓ 创建 leader-engine-discipline.yaml"
+  fi
+
+  if [ -f "$memories_dir/leader-role.md" ]; then
+    echo "  ✓ leader-role.md 已存在"
+  else
+    cat > "$memories_dir/leader-role.md" <<'MD'
+# Leader Role (注入到所有会话)
+- 我是 leader，不是 worker。
+- 所有项目代码操作必须通过 hermes-collab run 调度。
+- 例外：修复 8765 引擎本身的代码可以直接修改。
+- 禁止给 run 加外部 timeout。
+- 引擎失败先查根因再行动，不能绕过。
+MD
+    echo "  ✓ 创建 leader-role.md"
+  fi
+}
+
 resolve_path() {
   python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).expanduser().resolve())' "$1"
 }
@@ -171,6 +206,10 @@ else
   echo "  如需 Go 代理性能优化，请手动安装 Go 后执行:"
   echo "    cd '$INSTALL_DIR/proxy' && go build -o opencode-proxy ./cmd/server"
 fi
+
+echo ""
+echo "==> 注入 Leader 纪律 Skill/Memory"
+seed_engine_rules
 
 echo ""
 echo "==> 总结"

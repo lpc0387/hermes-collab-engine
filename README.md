@@ -24,6 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/lpc0387/hermes-collab-engine/main/s
 
 安装后：
 
+The install script also seeds leader role discipline skill and memory into your Hermes config, ensuring proper engine usage patterns.
+
 ```bash
 opc                  # 交互式配置并启动
 hermes-collab run "分析项目结构" --cwd .   # 直接运行任务
