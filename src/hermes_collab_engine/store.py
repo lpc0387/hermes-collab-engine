@@ -914,7 +914,7 @@ class CollabStore:
         return task_sets
 
     def get_node_summaries(self, run_id: str) -> list[dict[str, Any]]:
-        columns = "id,run_id,parent_id,title,capability,complexity,dependencies_json,parallelizable,deliverable,brief,shared_brief,estimated_duration,write_targets_json,skills_json,tools_json,fingerprint,status,attempt,checkpoint,session_id,duration_seconds,error,created_at,updated_at"
+        columns = "id,run_id,parent_id,title,capability,complexity,dependencies_json,parallelizable,deliverable,brief,shared_brief,estimated_duration,write_targets_json,skills_json,tools_json,fingerprint,status,attempt,checkpoint,session_id,duration_seconds,error,created_at,updated_at,result"
         return [dict(r) for r in self._query(f"SELECT {columns} FROM wbs_nodes WHERE run_id=? ORDER BY id", (run_id,))]
 
     def run_detail(self, run_id: str, full: bool = True, log_limit: int = 200, include_workers: bool = True) -> dict[str, Any]:

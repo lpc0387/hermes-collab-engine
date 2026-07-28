@@ -842,7 +842,7 @@ class CollabEngine:
             if review_text:
                 self.store.set_run_meta(run_id, {"leader_review": review_text})
                 self.store.log(run_id, "info", "worker finished", {
-                    "result": review_text,
+                    "result": review_text[:1000] + "..." if len(review_text) > 1000 else review_text,
                 }, node_id="aggregate")
             else:
                 # Fallback: simple summary if LLM review fails
@@ -1406,7 +1406,7 @@ class CollabEngine:
                     brief=node.brief,
                     write_targets=list(node.write_targets),
                     fingerprint=f"{parent_fingerprint}:impl:{i}",
-                )
+                                    )
                 impl_shards.append(impl_shard)
             return impl_shards
 
@@ -1430,7 +1430,7 @@ class CollabEngine:
             brief=node.brief,
             write_targets=[],
             fingerprint=f"{parent_fingerprint}:scope",
-        )
+            )
         evidence_shard = WBSNode(
             id=f"{node.id}-evidence-2",
             title=f"{node.title} / evidence",
@@ -1450,7 +1450,7 @@ class CollabEngine:
             brief=node.brief,
             write_targets=[],
             fingerprint=f"{parent_fingerprint}:evidence",
-        )
+            )
         # Phase 2: implementation shards that depend on phase 1
         impl_shards = []
         for i in range(max(1, split_count - 2)):
@@ -1477,7 +1477,7 @@ class CollabEngine:
                 brief=node.brief,
                 write_targets=list(node.write_targets),
                 fingerprint=f"{parent_fingerprint}:impl:{i}",
-            )
+                )
             impl_shards.append(impl_shard)
         return [scope_shard, evidence_shard] + impl_shards
 
@@ -1988,6 +1988,47 @@ class CollabEngine:
         if node.skills_json and node.tools_json:
             skill_names = json.loads(node.skills_json)
             tool_profile_names = json.loads(node.tools_json)
+        elif node.parent_id:
+            # Shard with no explicit skills: inherit from parent IF the parent has
+            # skills_json that differs from the auto-fill default for that capability.
+            # (Auto-filled skills match CAPABILITY_DEFAULT_SKILL; Leader-set ones don't.)
+            try:
+                parent_row = self.store.get_node(run_id, node.parent_id)
+                if parent_row:
+                    parent_cap = parent_row.get("capability") or ""
+                    parent_skills_raw = parent_row.get("skills_json") or ""
+                    parent_tools_raw = parent_row.get("tools_json") or ""
+
+                    # Determine what the auto-fill would produce for the parent
+                    auto_skills, _ = self._skill_distributor.resolve_for_node(
+                        node_capability=parent_cap,
+                        leader_skills=None,
+                    )
+                    auto_str = json.dumps(auto_skills)
+
+                    # Only inherit if parent's skills are DIFFERENT from auto-fill
+                    if parent_skills_raw and parent_skills_raw != auto_str:
+                        parent_parsed = json.loads(parent_skills_raw)
+                        if parent_parsed:
+                            skill_names = parent_parsed
+                            tool_profile_names = json.loads(parent_tools_raw) if parent_tools_raw else []
+                            node.skills_json = json.dumps(skill_names)
+                            node.tools_json = json.dumps(tool_profile_names)
+                        else:
+                            raise ValueError("empty")
+                    else:
+                        raise ValueError("auto-filled or empty")
+                else:
+                    raise ValueError("no parent row")
+            except (json.JSONDecodeError, ValueError, TypeError):
+                # Parent has no explicit skills; fall back to capability default
+                skill_names, tool_profile_names = self._skill_distributor.resolve_for_node(
+                    node_capability=node.capability,
+                    leader_skills=None,
+                    agent_backend=backend,
+                )
+                node.skills_json = json.dumps(skill_names)
+                node.tools_json = json.dumps(tool_profile_names)
         else:
             # Fallback: resolve both via SkillDistributor when either is missing
             skill_names, tool_profile_names = self._skill_distributor.resolve_for_node(
@@ -2017,13 +2058,19 @@ class CollabEngine:
         write_block = ""
         if write_targets:
             write_block = "Write targets reserved for this worker: " + ", ".join(sorted(write_targets)) + "\nOnly modify files under these repository-relative targets.\n\n"
-        prompt = f"""{backend.prompt_prefix}
+        prompt = f"""\
+{backend.prompt_prefix}
 
 WBS node: {node.title}
 Capability: {node.capability}
 Deliverable: {node.deliverable}
 
-{skills_block}{tools_block}{mcp_block}{write_block}{shared_brief_block}{brief_block}{upstream_block}Task:
+{skills_block}{tools_block}{mcp_block}{write_block}{shared_brief_block}{brief_block}{upstream_block}Instructions:
+1. You are the native AI agent running this task. When asked "who are you", answer with YOUR OWN identity — do NOT say you are Sisyphus, a worker, or a Hermes engine component.
+2. Complete the task below.
+3. Follow the output contract.
+
+Task:
 {node.description}
 
 Work in cwd: {self.cwd}

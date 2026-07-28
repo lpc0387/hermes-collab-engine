@@ -760,7 +760,7 @@ def main() -> int:
     run.add_argument("--request-file", help="Read request from file")
     run.add_argument("--title")
     run.add_argument("--cwd", default=".")
-    run.add_argument("--db", default="data/collab.sqlite3")
+    run.add_argument("--db", default="/root/hermes-collab-engine/data/collab.sqlite3")
     run.add_argument("--model", help="Use the same model for leader and workers")
     run.add_argument("--leader-model", help="Leader brain model for planning and aggregation")
     run.add_argument("--worker-model", help="Worker brain model for coding workers")
@@ -769,7 +769,7 @@ def main() -> int:
     run.add_argument("--worker-agent", default=None, help="Worker agent (default: same as --agent)")
     run.add_argument("--concurrency", type=int, default=2, help="Per-run in-flight workers (threads in run's pool)")
     run.add_argument("--global-max-concurrent", type=int, default=4, help="Global cap on opencode worker processes across ALL runs. Prevents 4-run storm (4GB RAM death spiral).")
-    run.add_argument("--timeout", type=int, default=86400)
+    # --timeout REMOVED 2026-07-27: past timeout abuse caused engine kills. Hardcoded 86400 in engine.run().
     run.add_argument("--max-retries", type=int, default=2)
     run.add_argument("--split-count", type=int, default=4)
     run.add_argument("--no-aggregate", action="store_true")
@@ -1035,7 +1035,7 @@ def main() -> int:
             request,
             title=args.title,
             concurrency=args.concurrency,
-            timeout=args.timeout,
+            timeout=86400,  # hardcoded: --timeout removed to prevent kill abuse
             max_retries=args.max_retries,
             split_count=args.split_count,
             aggregate=not args.no_aggregate,

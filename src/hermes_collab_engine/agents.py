@@ -140,7 +140,13 @@ class AgentBackend:
         self, stdout: str, stderr: str, returncode: int,
         node_id: str, node_title: str, duration: float, attempt: int,
     ) -> dict[str, Any]:
-        """Parse Claude Code JSON output format."""
+        """Parse Claude Code JSON output format.
+
+        Claude Code CLI may exit with code 1 even when the API call
+        succeeds (e.g. proxy-mediated responses). The authoritative
+        success indicator is the ``is_error`` field in the response JSON,
+        not the process exit code.
+        """
         text = stdout.strip()
         session_id = None
         ok = returncode == 0
@@ -148,7 +154,9 @@ class AgentBackend:
             parsed = json.loads(text)
             text = str(parsed.get("result", text))
             session_id = parsed.get("session_id")
-            ok = ok and not bool(parsed.get("is_error"))
+            # Authoritative check: use is_error from response, not exit code
+            is_error = bool(parsed.get("is_error", False))
+            ok = not is_error
         except Exception:
             pass
         return {
@@ -279,17 +287,17 @@ _register_builtin(AgentBackend(
     display_name="Claude Code",
     command=["claude"],
     prompt_flag="-p",
-    output_format_flags=[],
+    output_format_flags=["--output-format", "json"],
     supports_model_flag=True,
     model_flag="--model",
-    permission_flags=["--permission-mode", "auto"],
-    allowed_tools_flag="--allowedTools",
+    permission_flags=None,  # --permission-mode auto removed; allow-dangerously removed for proxy compat
+    allowed_tools_flag=None,  # --allowedTools removed; causes permission rule parsing errors
     output_parser="claude_json",
     process_pattern="claude.*--output-format",
-    prompt_prefix="You are a Claude Code worker in a Hermes collaboration engine.",
+    prompt_prefix="CRITICAL: Your name is Claude Code, created by Anthropic. You are NOT DeepSeek, NOT Sisyphus. When asked who you are, say: I am Claude Code, Anthropic's AI coding assistant.",
     prompt_suffix="",
-    default_allowed_tools=["Read", "Edit", "Write", "MultiEdit", "Bash(*)"],
-    capabilities=["file-edit", "git-ops", "test-run", "mcp-host", "search"],
+    default_allowed_tools=[],
+    capabilities=["deep-reasoning", "complex-refactor", "file-edit", "git-ops", "test-run", "mcp-host", "search"],
     reasoning_flags=[],
     reasoning_env={"ANTHROPIC_THINKING_BUDGET": "32000"},
 ))
@@ -302,14 +310,22 @@ def _claude_create_session(prompt: str, **kw) -> SessionHandle:
     import uuid
     sid = kw.get("session_id", "worker-" + uuid.uuid4().hex[:8])
     quiet = kw.get("quiet", True)
-    cmd = ["claude", "--resume", sid, "-p", prompt]
-    if quiet:
-        cmd.append("--quiet")
+    model = kw.get("model")
+    # First-time session: don't use --resume (session doesn't exist yet).
+    # Only session_send uses --resume for subsequent messages.
+    # Note: claude-code does NOT support --quiet flag, so we skip it.
+    backend = _BUILTINS.get("claude-code")
+    if backend:
+        cmd = backend.build_command(prompt, model=model, reasoning=False)
+    else:
+        cmd = ["claude", "-p", prompt]
     proc = _sp.Popen(
         cmd,
         stdin=_sp.DEVNULL, stdout=_sp.PIPE, stderr=_sp.PIPE,
         text=True, bufsize=1,
     )
+    import logging as _log
+    _log.getLogger(__name__).info(f"claude session cmd: {' '.join(cmd)}")
     return SessionHandle(session_id=sid, proc=proc, stdout=proc.stdout,
                          meta={"type": "claude"})
 
@@ -318,7 +334,7 @@ _c.create_session = _claude_create_session
 def _claude_session_send(handle: SessionHandle, message: str) -> None:
     import subprocess as _sp
     if handle.session_id:
-        cmd = ["claude", "--resume", handle.session_id, "-p", message, "--quiet"]
+        cmd = ["claude", "--resume", handle.session_id, "-p", message]
         _sp.Popen(cmd, stdin=_sp.DEVNULL, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
 
 _c.session_send = _claude_session_send
@@ -335,13 +351,16 @@ _register_builtin(AgentBackend(
     allowed_tools_flag=None,
     output_parser="codex_json",
     process_pattern="codex",
-    prompt_prefix="You are a Codex worker in a Hermes collaboration engine.",
+    prompt_prefix="You are Codex, an AI coding assistant by OpenAI.",
     prompt_suffix="",
     default_allowed_tools=[],
-    capabilities=["file-edit", "git-ops"],
+    capabilities=["quick-prototype", "sandbox-exec", "file-edit", "git-ops"],
     reasoning_flags=[],
     reasoning_env={},
-    needs_pty=True,
+    needs_pty=False,  # Codex needs PTY but engine can't provide it reliably;
+                      # leaving this True causes hangs. The engine dispatches
+                      # via one-shot subprocess; codex reads stdin from PIPE
+                      # and processes the prompt as positional arg instead.
 ))
 _register_builtin(AgentBackend(
     name="opencode",
@@ -355,10 +374,10 @@ _register_builtin(AgentBackend(
     allowed_tools_flag=None,
     output_parser="raw_text",
     process_pattern="opencode",
-    prompt_prefix="You are an OpenCode worker in a Hermes collaboration engine.",
+    prompt_prefix="You are Sisyphus, an AI orchestration agent from OhMyOpenCode.",
     prompt_suffix="",
     default_allowed_tools=[],
-    capabilities=["file-edit", "git-ops", "test-run", "mcp-host", "search"],
+    capabilities=["fullstack-dev", "file-edit", "git-ops", "test-run", "mcp-host", "search"],
     reasoning_flags=["--variant", "max"],
     reasoning_env={},
     auto_prefix="opencode-go/",
@@ -447,10 +466,10 @@ _register_builtin(AgentBackend(
     allowed_tools_flag=None,
     output_parser="raw_text",
     process_pattern="hermes",
-    prompt_prefix="You are Hermes, the orchestration agent in a collaboration engine.",
+    prompt_prefix="",
     prompt_suffix="",
     default_allowed_tools=[],
-    capabilities=["planning", "analysis", "orchestration", "file-edit", "git-ops", "search"],
+    capabilities=["leader-planning", "analysis", "code-review", "skill-management", "memory-management"],
     reasoning_flags=[],
     reasoning_env={"HERMES_REASONING_EFFORT": "high"},
 ))
@@ -499,6 +518,106 @@ def _hermes_session_send(handle: SessionHandle, message: str) -> None:
         handle.stdin.flush()
 
 _h.session_send = _hermes_session_send
+
+
+# ── CodeBuddy (Tencent AI Coding Assistant) ───────────────────
+# CodeBuddy by Tencent is a conversational AI coding agent in the
+# same category as Claude Code / OpenCode. It supports:
+#   -p/--print for non-interactive output
+#   --output-format json for structured results
+#   --model to select the model
+#   -r/--resume for session continuation
+#   --permission-mode for permission control
+#   --serve for HTTP/Web UI mode
+_register_builtin(AgentBackend(
+    name="codebuddy",
+    display_name="CodeBuddy (Tencent AI)",
+    command=["codebuddy"],
+    prompt_flag="-p",
+    output_format_flags=["--output-format", "json"],
+    supports_model_flag=True,
+    model_flag="--model",
+    permission_flags=["--permission-mode", "auto"],
+    allowed_tools_flag="--allowedTools",
+    output_parser="raw_text",
+    process_pattern="codebuddy",
+    prompt_prefix="You are CodeBuddy, an AI coding assistant by Tencent.",
+    prompt_suffix="",
+    default_allowed_tools=["Read", "Edit", "Write", "Bash"],
+    capabilities=["file-edit", "git-ops", "test-run", "search", "mcp-host", "tencent-ai"],
+    reasoning_flags=[],
+    reasoning_env={},
+    auto_prefix="",
+))
+# Remove the old @workbuddy/cli-vnext entry (CRM tool, not a coding agent)
+_BUILTINS.pop("workbuddy", None)
+
+
+# ── Capability-based routing helper ───────────────────────────
+# Maps high-level task types to preferred agent (ordered by priority).
+# Based on official documentation for each agent CLI.
+#
+# Agent functional profiles (from docs):
+#   opencode  — full-stack TUI agent, supports providers/MCP/sessions/plugins
+#               Best for: general development, git ops, full project work
+#   claude-code — Anthropic's agent, depth-first reasoning, custom agents
+#               Best for: complex refactoring, deep reasoning, code review
+#   codex     — OpenAI's sandboxed agent, exec+review mode
+#               Best for: quick prototypes, sandboxed exec, code review
+#   hermes    — Leader/planner, task orchestration, skill management
+#               Best for: planning, analysis, review, coordination
+#   codebuddy — Tencent's AI agent, multi-model (gemini/gpt/deepseek/glm/kimi)
+#               Best for: tencent-ecosystem tasks, multi-model fallback
+TASK_TO_AGENT_ROUTING: dict[str, list[str]] = {
+    # Development tasks
+    "implement":         ["opencode", "claude-code", "codebuddy"],
+    "fullstack-dev":     ["opencode", "claude-code", "codebuddy"],
+    "refactor":          ["claude-code", "opencode", "codebuddy"],
+    "complex-refactor":  ["claude-code"],
+
+    # Quick tasks
+    "prototype":         ["codex", "opencode"],
+    "quick-fix":         ["opencode", "codebuddy", "codex"],
+    "bug-patch":         ["opencode", "codex", "codebuddy"],
+    "sandbox-exec":      ["codex"],
+
+    # Tencent-ecosystem tasks
+    "tencent-ai":        ["codebuddy", "opencode"],
+
+    # Leader-only tasks
+    "plan":              ["hermes"],
+    "review":            ["hermes"],
+    "analyze":           ["hermes"],
+
+    # Generic fallbacks
+    "search":            ["opencode", "claude-code", "hermes"],
+    "test":              ["opencode", "claude-code", "codebuddy"],
+}
+
+
+def route_task_to_agent(task_type: str, available_backends: list | None = None) -> str:
+    """Pick the best available agent for a given task type.
+
+    Falls back to 'opencode' if no preferred agent is available or
+    the task type is unknown.
+    """
+    preferred = TASK_TO_AGENT_ROUTING.get(task_type, ["opencode"])
+    # If available_backends is provided, filter for availability
+    if available_backends is not None:
+        avail_names = {b.name for b in available_backends}
+        for agent_name in preferred:
+            if agent_name in avail_names:
+                return agent_name
+        return "opencode"
+    # Otherwise check PATH
+    for agent_name in preferred:
+        try:
+            b = get_backend(agent_name)
+            if b.is_available():
+                return agent_name
+        except KeyError:
+            continue
+    return "opencode"
 
 
 

@@ -34,6 +34,12 @@ SKILL_TOOL_MAP: dict[str, list[str]] = {
     "browser-automation":       ["browser-automation"],
     "frontend-optimization":   ["file-edit", "git-local"],
     "ui-design-v2":            ["file-edit", "mcp-readonly"],
+    # Frontend design skills (installed from GitHub, Jul 2026)
+    "design-taste-frontend":   ["file-edit", "git-local", "browser-automation"],
+    "impeccable":              ["file-edit", "git-local", "browser-automation"],
+    "hallmark":                ["file-edit", "git-local"],
+    "lenis":                   ["file-edit", "git-local"],
+    "gsap":                    ["file-edit", "git-local"],
 }
 
 
@@ -84,6 +90,32 @@ SKILL_MCP_MAP: dict[str, dict] = {
         "agent_compat": ["claude-code", "hermes"],
         "readonly": True,
     },
+    # Frontend design skills (installed from GitHub, Jul 2026)
+    "design-taste-frontend": {
+        "mcp_servers": ["shadcn-ui"],
+        "agent_compat": ["claude-code", "hermes", "opencode"],
+        "readonly": True,
+    },
+    "impeccable": {
+        "mcp_servers": [],
+        "agent_compat": ["claude-code", "hermes", "opencode"],
+        "readonly": True,
+    },
+    "hallmark": {
+        "mcp_servers": ["daisyui"],
+        "agent_compat": ["claude-code", "hermes", "opencode"],
+        "readonly": True,
+    },
+    "lenis": {
+        "mcp_servers": [],
+        "agent_compat": ["claude-code", "hermes", "opencode"],
+        "readonly": True,
+    },
+    "gsap": {
+        "mcp_servers": [],
+        "agent_compat": ["claude-code", "hermes", "opencode"],
+        "readonly": True,
+    },
 }
 
 
@@ -107,6 +139,12 @@ CAPABILITY_DEFAULT_SKILL: dict[str, str] = {
     "frontend":         "frontend-optimization",
     "ui":               "frontend-optimization",
     "design-v2":        "ui-design-v2",
+    # Frontend design skills (installed from GitHub, Jul 2026)
+    "creative-design":  "design-taste-frontend",
+    "design-audit":     "impeccable",
+    "anti-slop":        "hallmark",
+    "animation":        "gsap",
+    "smooth-scroll":    "lenis",
 }
 
 

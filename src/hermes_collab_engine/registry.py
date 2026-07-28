@@ -495,6 +495,78 @@ def get_unified_registry() -> UnifiedRegistry:
             priority=2, source="hermes",
         ))
 
+        # ── Frontend design skills (installed from GitHub, Jul 2026) ──────────
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="design-taste-frontend", display_name="Taste-Skill — Anti-Slop Frontend", category="design",
+            description="Anti-slop frontend skill for landing pages, portfolios, and redesigns.",
+            content=(
+                "## Taste-Skill: Anti-Slop Frontend\n"
+                "- Read the brief first, infer design direction before coding.\n"
+                "- Set three dials: DESIGN_VARIANCE, MOTION_INTENSITY, VISUAL_DENSITY.\n"
+                "- Never default to AI-purple gradients, centered hero, three feature cards, Inter+slate-900.\n"
+                "- Use GSAP for animations with official API patterns (gsap.to(), timeline()).\n"
+                "- Use Lenis for smooth scrolling integration with GSAP ScrollTrigger."
+            ),
+            capabilities=["implementation", "design", "creative-design", "frontend", "ui"],
+            priority=2, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="gsap", display_name="GSAP Animation Library", category="design",
+            description="GreenSock Animation Platform — high-performance JavaScript animation library.",
+            content=(
+                "## GSAP Animation\n"
+                "- Use gsap.to(targets, vars) for tween animations from current state.\n"
+                "- Use gsap.timeline() for sequenced multi-step animations.\n"
+                "- Common eases: power2.out, back.out(1.7), elastic.out(1,0.3).\n"
+                "- Always use camelCase CSS properties (backgroundColor, marginTop).\n"
+                "- Register plugins: gsap.registerPlugin(ScrollTrigger).\n"
+                "- Integrate with Lenis: lenis.on('scroll', ScrollTrigger.update)."
+            ),
+            capabilities=["implementation", "design", "animation", "frontend"],
+            priority=2, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="lenis", display_name="Lenis Smooth Scroll", category="design",
+            description="Lightweight, performant smooth scroll library with framework adapters.",
+            content=(
+                "## Lenis Smooth Scroll\n"
+                "- Create: new Lenis({ duration: 1.2, easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)) }).\n"
+                "- RAF loop: function raf(time) { lenis.raf(time); requestAnimationFrame(raf); }.\n"
+                "- GSAP integration: lenis.on('scroll', ScrollTrigger.update); gsap.ticker.add((t)=>lenis.raf(t*1000)).\n"
+                "- Properties: lenis.animatedScroll, lenis.direction, lenis.progress, lenis.velocity.\n"
+                "- Methods: lenis.scrollTo(target, {offset, duration, easing})."
+            ),
+            capabilities=["implementation", "design", "smooth-scroll", "frontend"],
+            priority=2, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="hallmark", display_name="Hallmark — Anti-AI-Slop Design", category="design",
+            description="Anti-AI-slop design skill for greenfield pages, audits, redesigns.",
+            content=(
+                "## Hallmark: Design That Refuses to Look AI-Generated\n"
+                "- Four verbs: default (build), audit (score), redesign (replace structure), study (extract DNA).\n"
+                "- Pre-emit self-critique on 6 axes before handing back output.\n"
+                "- No fabricated metrics, testimonials, or logos.\n"
+                "- 57 slop-test gates including contrast, typography, responsive checks.\n"
+                "- Mobile responsiveness verified at 320/375/414/768px."
+            ),
+            capabilities=["implementation", "design", "anti-slop", "frontend", "ui"],
+            priority=2, source="hermes",
+        ))
+        _DEFAULT_REGISTRY.register(SkillEntry(
+            name="impeccable", display_name="Impeccable Design Language", category="design",
+            description="Design guidance for AI coding agents — 23 commands, 60 detector rules.",
+            content=(
+                "## Impeccable: Design Guidance for AI Agents\n"
+                "- 23 commands: craft, shape, critique, audit, polish, bolder, quieter, animate, etc.\n"
+                "- Three modes: Persuade (landing/marketing), Operate (app UI/dashboards), Read (docs).\n"
+                "- Never use Inter for everything, purple-blue gradients, cards-in-cards.\n"
+                "- Before editing, load reference/new-work.md or reference/craft-floor.md."
+            ),
+            capabilities=["implementation", "design", "design-audit", "frontend", "ui"],
+            priority=2, source="hermes",
+        ))
+
         # Register built-in tool profiles
         _DEFAULT_REGISTRY.register(ToolEntry(
             name="file-edit", display_name="File Read/Edit", category="filesystem",

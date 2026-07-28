@@ -31,8 +31,8 @@ class AgentBackendDataclassTests(unittest.TestCase):
         self.assertIn("hello", cmd)
         self.assertIn("--model", cmd)
         self.assertIn("sonnet-4", cmd)
-        self.assertNotIn("--output-format", cmd)
-        self.assertNotIn("json", cmd)
+        self.assertIn("--output-format", cmd)
+        self.assertIn("json", cmd)
 
     def test_build_command_claude_code_without_model(self):
         b = get_backend("claude-code")
