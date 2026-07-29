@@ -481,7 +481,7 @@ def _dispatch_single(agent: str, task: str, cwd: Path, model: str | None,
                         last_output_time = now
                         # Print live output with prefix
                         if _line_s.strip():
-                            print(f"{prefix}  {_line_s[:200]}", flush=True)
+                            print(f"{prefix}  {_line_s[:800]}", flush=True)
 
             if proc.stderr:
                 _r2, _, _ = _sel.select([proc.stderr], [], [], 0)
@@ -607,6 +607,17 @@ def _run_leader_task(task: str, cwd: Path, model: str | None,
             if result and result.get("ok"):
                 proto.emit_completed(run_id, result.get("dur", 0))
                 eng.store._execute("UPDATE runs SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=?", (run_id,))
+                _result_text = result.get("stdout", "").strip()
+                if _result_text:
+                    # For claude/codex JSON output, extract the human-readable part
+                    if _result_text.startswith("{"):
+                        import json as _j2
+                        try:
+                            _parsed = _j2.loads(_result_text)
+                            _result_text = _parsed.get("result", _result_text)
+                        except Exception:
+                            pass
+                    print(_result_text)
                 print(f"  ✅ Run {run_id} completed")
                 return
             else:

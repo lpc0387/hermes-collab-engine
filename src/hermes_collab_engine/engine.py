@@ -2236,6 +2236,12 @@ Output contract:
                         continue
                     _filtered.append(_line)
                 _stderr_text = "\n".join(_filtered)
+            # Session-based agents (claude-code, opencode, hermes) write to PIPE,
+            # not temp files — fall back to child_stdout when temp file is empty
+            if not _stdout_text.strip() and child_stdout:
+                _stdout_text = child_stdout
+            if not _stderr_text.strip() and child_stderr:
+                _stderr_text = child_stderr
             proc.stdout = _stdout_text
             proc.stderr = _stderr_text
         except subprocess.TimeoutExpired as exc:

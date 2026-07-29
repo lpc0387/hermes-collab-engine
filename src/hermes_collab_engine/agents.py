@@ -182,6 +182,37 @@ class AgentBackend:
             "result_struct": None,
         }
 
+    def _parse_codebuddy_json(
+        self, stdout: str, stderr: str, returncode: int,
+        node_id: str, node_title: str, duration: float, attempt: int,
+    ) -> dict[str, Any]:
+        """Parse CodeBuddy JSON conversation format."""
+        import json as _j
+        text = stdout.strip()
+        session_id = None
+        ok = returncode == 0
+        # CodeBuddy outputs full conversation JSON — find the last assistant message
+        if text.startswith("["):
+            try:
+                msgs = _j.loads(text)
+                for msg in reversed(msgs):
+                    if isinstance(msg, dict) and msg.get("role") == "assistant":
+                        for c in (msg.get("content") or []):
+                            if isinstance(c, dict) and c.get("type") == "output_text":
+                                text = c["text"]
+                                break
+                        break
+            except Exception:
+                pass
+        return {
+            "ok": ok,
+            "result": text,
+            "session_id": session_id,
+            "returncode": returncode,
+            "stderr": stderr,
+            "result_struct": None,
+        }
+
     def _parse_codex_json(
         self, stdout: str, stderr: str, returncode: int,
         node_id: str, node_title: str, duration: float, attempt: int,
@@ -290,13 +321,13 @@ _register_builtin(AgentBackend(
     output_format_flags=["--output-format", "json"],
     supports_model_flag=True,
     model_flag="--model",
-    permission_flags=None,  # --permission-mode auto removed; allow-dangerously removed for proxy compat
-    allowed_tools_flag=None,  # --allowedTools removed; causes permission rule parsing errors
+    permission_flags=None,  # --allow-dangerously-skip-permissions blocked as root
+    allowed_tools_flag="--allowedTools",
+    default_allowed_tools=["Read", "Edit", "Write", "Bash"],  # whitelist tools to avoid stdin prompts
     output_parser="claude_json",
     process_pattern="claude.*--output-format",
     prompt_prefix="CRITICAL: Your name is Claude Code, created by Anthropic. You are NOT DeepSeek, NOT Sisyphus. When asked who you are, say: I am Claude Code, Anthropic's AI coding assistant.",
     prompt_suffix="",
-    default_allowed_tools=[],
     capabilities=["deep-reasoning", "complex-refactor", "file-edit", "git-ops", "test-run", "mcp-host", "search"],
     reasoning_flags=[],
     reasoning_env={"ANTHROPIC_THINKING_BUDGET": "32000"},
@@ -344,7 +375,7 @@ _register_builtin(AgentBackend(
     display_name="Codex CLI",
     command=["codex", "exec"],
     prompt_flag="",  # codex takes prompt as positional arg
-    output_format_flags=["--skip-git-repo-check", "--sandbox", "workspace-write"],
+    output_format_flags=["--skip-git-repo-check", "--sandbox", "workspace-write", "--json"],
     supports_model_flag=True,
     model_flag="--model",
     permission_flags=None,
@@ -475,14 +506,15 @@ _register_builtin(AgentBackend(
 ))
 # 为 hermes backend 注入持久会话能力
 _h = _BUILTINS["hermes"]
-_h._supports_sessions = True
+# _h._supports_sessions disabled: hermes chat crashes in fetch_models_dev (signal handler KeyboardInterrupt)
+_h._supports_sessions = False
 
 def _hermes_create_session(prompt: str, **kw) -> SessionHandle:
     import subprocess as _sp
     import uuid
     sid = kw.get("session_id", "worker-" + uuid.uuid4().hex[:8])
     quiet = kw.get("quiet", True)
-    cmd = ["hermes", "chat", "-q", "", "--resume", sid]
+    cmd = ["hermes", "chat", "--resume", sid, "--no-restore-cwd"]
     if quiet:
         cmd.append("--quiet")
     proc = _sp.Popen(
@@ -507,7 +539,8 @@ def _hermes_create_session(prompt: str, **kw) -> SessionHandle:
     if proc.stdin:
         proc.stdin.write(prompt + "\n")
         proc.stdin.flush()
-    return SessionHandle(session_id=sid, proc=proc, stdin=proc.stdin, stdout=proc.stdout,
+        proc.stdin.close()  # Signal EOF so hermes exits
+    return SessionHandle(session_id=sid, proc=proc, stdin=None, stdout=proc.stdout,
                          meta={"type": "hermes"})
 
 _h.create_session = _hermes_create_session
@@ -539,7 +572,7 @@ _register_builtin(AgentBackend(
     model_flag="--model",
     permission_flags=["--permission-mode", "auto"],
     allowed_tools_flag="--allowedTools",
-    output_parser="raw_text",
+    output_parser="codebuddy_json",
     process_pattern="codebuddy",
     prompt_prefix="You are CodeBuddy, an AI coding assistant by Tencent.",
     prompt_suffix="",
@@ -547,7 +580,7 @@ _register_builtin(AgentBackend(
     capabilities=["file-edit", "git-ops", "test-run", "search", "mcp-host", "tencent-ai"],
     reasoning_flags=[],
     reasoning_env={},
-    auto_prefix="",
+    auto_prefix="custom-local:",
 ))
 # Remove the old @workbuddy/cli-vnext entry (CRM tool, not a coding agent)
 _BUILTINS.pop("workbuddy", None)
